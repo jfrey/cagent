@@ -204,6 +204,11 @@ type LocalRuntime struct {
 	// fallbackCooldowns tracks per-agent cooldown state for sticky fallback behavior
 	fallbackCooldowns    map[string]*fallbackCooldownState
 	fallbackCooldownsMux sync.RWMutex
+
+	// extraTools are additional tools injected by the caller (e.g., graph tools
+	// during workflow execution). They are appended to every agent's tool list
+	// and their handlers are registered in the toolMap.
+	extraTools []tools.Tool
 }
 
 type streamResult struct {
@@ -248,6 +253,15 @@ func WithSessionCompaction(sessionCompaction bool) Opt {
 func WithModelStore(store ModelStore) Opt {
 	return func(r *LocalRuntime) {
 		r.modelsStore = store
+	}
+}
+
+// WithExtraTools injects additional tools into the runtime. These tools are
+// appended to every agent's tool list and their handlers are registered
+// automatically. Useful for exposing graph tools during workflow execution.
+func WithExtraTools(extraTools []tools.Tool) Opt {
+	return func(r *LocalRuntime) {
+		r.extraTools = extraTools
 	}
 }
 
@@ -316,6 +330,19 @@ func NewLocalRuntime(agents *team.Team, opts ...Opt) (*LocalRuntime, error) {
 	}
 
 	r.sessionCompactor = newSessionCompactor(model, r.sessionStore)
+
+	// Register handlers for any extra tools injected by the caller.
+	for _, t := range r.extraTools {
+		if t.Handler != nil {
+			handler := t.Handler // capture for closure
+			r.toolMap[t.Name] = ToolHandler{
+				handler: func(ctx context.Context, _ *session.Session, tc tools.ToolCall, _ chan Event) (*tools.ToolCallResult, error) {
+					return handler(ctx, tc)
+				},
+				tool: t,
+			}
+		}
+	}
 
 	slog.Debug("Creating new runtime", "agent", r.currentAgent, "available_agents", agents.Size())
 
@@ -1140,6 +1167,11 @@ func (r *LocalRuntime) getTools(ctx context.Context, a *agent.Agent, sessionSpan
 		sessionSpan.SetStatus(codes.Error, "failed to get tools")
 		telemetry.RecordError(ctx, err.Error())
 		return nil, err
+	}
+
+	// Append any extra tools injected by the caller (e.g., graph tools).
+	if len(r.extraTools) > 0 {
+		agentTools = append(agentTools, r.extraTools...)
 	}
 
 	slog.Debug("Retrieved agent tools", "agent", a.Name(), "tool_count", len(agentTools))
