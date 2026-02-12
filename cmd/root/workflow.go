@@ -16,8 +16,8 @@ import (
 
 func newWorkflowCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "workflow",
-		Short: "Run graph-based workflows",
+		Use:     "workflow",
+		Short:   "Run graph-based workflows",
 		GroupID: "core",
 	}
 
@@ -27,6 +27,7 @@ func newWorkflowCmd() *cobra.Command {
 
 type workflowRunFlags struct {
 	inputs    []string
+	agents    string
 	runConfig config.RuntimeConfig
 }
 
@@ -34,28 +35,31 @@ func newWorkflowRunCmd() *cobra.Command {
 	var flags workflowRunFlags
 
 	cmd := &cobra.Command{
-		Use:   "run <agent-file> <graph-file>",
-		Short: "Execute a .graph workflow",
-		Long:  "Load an agent team and execute a .graph workflow file",
-		Example: `  cagent workflow run ./agent.yaml ./pipeline.graph
-  cagent workflow run ./agent.yaml ./review.graph --input source_code="$(cat main.go)"
-  cagent workflow run ./agent.yaml ./pipeline.graph --input prompt="Review this code"`,
-		Args: cobra.ExactArgs(2),
+		Use:   "run <graph-file>",
+		Short: "Execute a .cgt workflow",
+		Long: `Execute a .cgt workflow file. Agent, model, and provider definitions
+can be embedded directly in the .cgt file. Use --agents to provide
+additional model/agent configuration from a YAML file (e.g., for
+custom API endpoints or credentials).`,
+		Example: `  cagent workflow run ./pipeline.cgt --input topic="Docker containers"
+  cagent workflow run ./review.cgt --agents ./models.yaml --input prompt="Review this"
+  cagent workflow run ./research.cgt --input question="What is the best search API?"`,
+		Args: cobra.ExactArgs(1),
 		RunE: flags.runWorkflow,
 	}
 
 	cmd.Flags().StringArrayVar(&flags.inputs, "input", nil, "Seed graph input as type=content (repeatable)")
+	cmd.Flags().StringVar(&flags.agents, "agents", "", "Agent/model configuration YAML file (optional if .cgt defines models)")
 	addRuntimeConfigFlags(cmd, &flags.runConfig)
 
 	return cmd
 }
 
 func (f *workflowRunFlags) runWorkflow(cmd *cobra.Command, args []string) error {
-	telemetry.TrackCommand("workflow run", args)
+	telemetry.TrackCommand("workflow run", nil)
 
 	ctx := cmd.Context()
-	agentFile := args[0]
-	graphFile := args[1]
+	graphFile := args[0]
 
 	// Parse inputs.
 	inputs := make(map[string]string)
@@ -67,27 +71,42 @@ func (f *workflowRunFlags) runWorkflow(cmd *cobra.Command, args []string) error 
 		inputs[k] = v
 	}
 
-	// Load agent team.
-	agentSource, err := config.Resolve(agentFile, f.runConfig.EnvProvider())
-	if err != nil {
-		return fmt.Errorf("resolve agent: %w", err)
-	}
-
-	loadResult, err := teamloader.LoadWithConfig(ctx, agentSource, &f.runConfig)
-	if err != nil {
-		return fmt.Errorf("load agents: %w", err)
-	}
-	defer func() {
-		cleanupCtx := context.WithoutCancel(ctx)
-		if err := loadResult.Team.StopToolSets(cleanupCtx); err != nil {
-			slog.Error("Failed to stop tool sets", "error", err)
+	// Load agent team — either from --agents file or we'll build one from the .cgt file later.
+	var loadResult *teamloader.LoadResult
+	if f.agents != "" {
+		agentSource, err := config.Resolve(f.agents, f.runConfig.EnvProvider())
+		if err != nil {
+			return fmt.Errorf("resolve agents: %w", err)
 		}
-	}()
 
-	// Run workflow.
-	exec := workflow.New(loadResult.Team,
-		workflow.WithLogger(slog.Default()),
-	)
+		result, err := teamloader.LoadWithConfig(ctx, agentSource, &f.runConfig)
+		if err != nil {
+			return fmt.Errorf("load agents: %w", err)
+		}
+		loadResult = result
+	}
+
+	// Build executor options.
+	var execOpts []workflow.Option
+	execOpts = append(execOpts, workflow.WithLogger(slog.Default()))
+
+	if loadResult != nil {
+		defer func() {
+			cleanupCtx := context.WithoutCancel(ctx)
+			if err := loadResult.Team.StopToolSets(cleanupCtx); err != nil {
+				slog.Error("Failed to stop tool sets", "error", err)
+			}
+		}()
+	}
+
+	// Run workflow. If no --agents file, pass nil team — the executor will
+	// build agents from the .cgt file's definitions via AgentParams.
+	var exec *workflow.Executor
+	if loadResult != nil {
+		exec = workflow.New(loadResult.Team, execOpts...)
+	} else {
+		exec = workflow.New(nil, execOpts...)
+	}
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Running workflow: %s\n", graphFile)
 
