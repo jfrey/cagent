@@ -7,13 +7,21 @@ import (
 	"os"
 	"path/filepath"
 
+	"encoding/json"
+	"strings"
+
 	graphagent "github.com/docker/cagent-graph/pkg/agent"
 	"github.com/docker/cagent-graph/pkg/engine"
 	graphpb "github.com/docker/cagent-graph/pkg/graph/v1"
 	"github.com/docker/cagent-graph/pkg/runner"
+	cagent "github.com/docker/cagent/pkg/agent"
+	"github.com/docker/cagent/pkg/config/latest"
+	"github.com/docker/cagent/pkg/environment"
+	provider "github.com/docker/cagent/pkg/model/provider"
 	"github.com/docker/cagent/pkg/runtime"
 	"github.com/docker/cagent/pkg/session"
 	"github.com/docker/cagent/pkg/team"
+	"github.com/docker/cagent/pkg/tools"
 )
 
 // Result holds the outcome of a workflow execution.
@@ -150,29 +158,43 @@ func (e *Executor) run(ctx context.Context, r *runner.Runner, inputs map[string]
 // defaultAgentFunc bridges cagent-graph's AgentFunc to cagent's runtime.
 // Each invocation creates its own LocalRuntime for safe concurrent execution.
 //
-// The graph step agent name is matched against the team's named agents. If a
-// matching agent exists, its model and configuration are used; otherwise the
-// team's default agent is used as a fallback. The graph engine provides the
-// full prompt (instruction + graph data) via params.Prompt.
+// When a team is provided (--agents), the graph step name is matched against
+// the team's named agents. When no team exists, agents are built on-the-fly
+// from the .cgt file's agent/model/provider definitions in AgentParams.
 func (e *Executor) defaultAgentFunc(ctx context.Context, params graphagent.AgentParams) (*graphagent.AgentResult, error) {
-	// Try to find a matching named agent; fall back to the default.
-	a, err := e.team.Agent(params.Agent)
-	if err != nil {
-		a, err = e.team.DefaultAgent()
-		if err != nil {
-			return nil, fmt.Errorf("no default agent: %w", err)
+	// Convert graph MCP tools to cagent tools with handlers that route
+	// back to the graph via params.ToolCall.
+	var graphTools []tools.Tool
+	if params.ToolCall != nil {
+		for _, mt := range params.MCPTools {
+			graphTools = append(graphTools, mcpToolToCagentTool(mt, params.ToolCall))
 		}
 	}
 
-	rt, err := runtime.NewLocalRuntime(e.team, runtime.WithCurrentAgent(a.Name()))
+	// Build the runtime and resolve agent config.
+	rt, instruction, maxIter, err := e.buildRuntime(ctx, params, graphTools)
 	if err != nil {
-		return nil, fmt.Errorf("create runtime for step %s: %w", params.Agent, err)
+		return nil, err
 	}
 
+	// Build the system message from:
+	// 1. Workflow execution context (how the pipeline works)
+	// 2. Agent instruction (from .cgt or agent.yaml)
+	// 3. Prompt data from the graph engine (node content to process)
+	var systemParts []string
+	systemParts = append(systemParts, workflowContextPrompt)
+	if instruction != "" {
+		systemParts = append(systemParts, instruction)
+	}
+	if params.Prompt != "" {
+		systemParts = append(systemParts, "--- INPUT DATA ---\n"+params.Prompt)
+	}
+	systemMsg := strings.Join(systemParts, "\n\n")
+
 	sess := session.New(
-		session.WithSystemMessage(params.Prompt),
+		session.WithSystemMessage(systemMsg),
 		session.WithImplicitUserMessage("Please proceed."),
-		session.WithMaxIterations(a.MaxIterations()),
+		session.WithMaxIterations(maxIter),
 		session.WithToolsApproved(true),
 		session.WithSendUserMessage(false),
 	)
@@ -199,6 +221,190 @@ func (e *Executor) defaultAgentFunc(ctx context.Context, params graphagent.Agent
 		TokensOut: int(totalOut),
 		CostUSD:   totalCost,
 	}, nil
+}
+
+// buildRuntime creates a LocalRuntime for a workflow step. When a team exists
+// (from --agents), it uses the team's agents. When no team exists, it builds
+// an agent on-the-fly from the .cgt file's definitions.
+func (e *Executor) buildRuntime(ctx context.Context, params graphagent.AgentParams, graphTools []tools.Tool) (*runtime.LocalRuntime, string, int, error) {
+	if e.team != nil {
+		return e.buildRuntimeFromTeam(ctx, params, graphTools)
+	}
+	return e.buildRuntimeFromGraph(ctx, params, graphTools)
+}
+
+// buildRuntimeFromTeam creates a runtime using the team's named agents.
+func (e *Executor) buildRuntimeFromTeam(ctx context.Context, params graphagent.AgentParams, graphTools []tools.Tool) (*runtime.LocalRuntime, string, int, error) {
+	a, err := e.team.Agent(params.Agent)
+	if err != nil {
+		a, err = e.team.DefaultAgent()
+		if err != nil {
+			return nil, "", 0, fmt.Errorf("no default agent: %w", err)
+		}
+	}
+
+	rtOpts := []runtime.Opt{runtime.WithCurrentAgent(a.Name())}
+	if len(graphTools) > 0 {
+		rtOpts = append(rtOpts, runtime.WithExtraTools(graphTools))
+	}
+
+	rt, err := runtime.NewLocalRuntime(e.team, rtOpts...)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("create runtime for step %s: %w", params.Agent, err)
+	}
+
+	// .cgt instruction is canonical; fall back to team agent.
+	instruction := params.Instruction
+	if instruction == "" {
+		instruction = a.Instruction()
+	}
+
+	maxIter := a.MaxIterations()
+	if params.AgentDef != nil && params.AgentDef.MaxIterations > 0 {
+		maxIter = params.AgentDef.MaxIterations
+	}
+
+	return rt, instruction, maxIter, nil
+}
+
+// buildRuntimeFromGraph creates a runtime from the .cgt file's agent/model/provider
+// definitions — no agent.yaml needed.
+func (e *Executor) buildRuntimeFromGraph(ctx context.Context, params graphagent.AgentParams, graphTools []tools.Tool) (*runtime.LocalRuntime, string, int, error) {
+	if params.AgentDef == nil {
+		return nil, "", 0, fmt.Errorf("step %s: no agent definition (provide --agents or define agents in .cgt)", params.Agent)
+	}
+
+	// Resolve the model config from .cgt definitions.
+	modelCfg, err := resolveModelConfig(params)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("step %s: %w", params.Agent, err)
+	}
+
+	// Create a provider from the resolved model config.
+	env := environment.NewOsEnvProvider()
+	p, err := provider.New(ctx, modelCfg, env)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("step %s: create provider: %w", params.Agent, err)
+	}
+
+	// Build a minimal agent with the model.
+	a := cagent.New(params.Agent, params.Instruction,
+		cagent.WithModel(p),
+		cagent.WithDescription(params.AgentDef.Description),
+		cagent.WithMaxIterations(params.AgentDef.MaxIterations),
+		cagent.WithSkillsEnabled(params.AgentDef.Skills),
+	)
+
+	// Build a single-agent team.
+	t := team.New(team.WithAgents(a))
+
+	rtOpts := []runtime.Opt{runtime.WithCurrentAgent(params.Agent)}
+	if len(graphTools) > 0 {
+		rtOpts = append(rtOpts, runtime.WithExtraTools(graphTools))
+	}
+
+	rt, err := runtime.NewLocalRuntime(t, rtOpts...)
+	if err != nil {
+		return nil, "", 0, fmt.Errorf("create runtime for step %s: %w", params.Agent, err)
+	}
+
+	return rt, params.Instruction, params.AgentDef.MaxIterations, nil
+}
+
+// resolveModelConfig converts .cgt model/provider definitions into a
+// latest.ModelConfig that cagent's provider system understands.
+func resolveModelConfig(params graphagent.AgentParams) (*latest.ModelConfig, error) {
+	modelName := params.Model
+	if modelName == "" && params.AgentDef != nil {
+		modelName = params.AgentDef.Model
+	}
+	if modelName == "" {
+		return nil, fmt.Errorf("no model specified")
+	}
+
+	// Check if the model name references a .cgt model definition.
+	if md, ok := params.Models[modelName]; ok {
+		cfg := &latest.ModelConfig{
+			Provider: md.Provider,
+			Model:    md.Model,
+			BaseURL:  md.BaseURL,
+			TokenKey: md.TokenKey,
+		}
+		if md.MaxTokens > 0 {
+			cfg.MaxTokens = &md.MaxTokens
+		}
+		if md.Temperature != nil {
+			cfg.Temperature = md.Temperature
+		}
+		if md.TopP != nil {
+			cfg.TopP = md.TopP
+		}
+		if md.ContextLimit > 0 {
+			cfg.ContextLimit = &md.ContextLimit
+		}
+		if md.ProviderOpts != nil {
+			cfg.ProviderOpts = md.ProviderOpts
+		}
+
+		// Merge provider-level config (base_url, token_key) if not set on model.
+		if pd, ok := params.Providers[md.Provider]; ok {
+			if cfg.BaseURL == "" {
+				cfg.BaseURL = pd.BaseURL
+			}
+			if cfg.TokenKey == "" {
+				cfg.TokenKey = pd.TokenKey
+			}
+		}
+		return cfg, nil
+	}
+
+	// Try as an inline "provider/model" reference (e.g., "anthropic/claude-haiku-4-5").
+	if p, m, ok := strings.Cut(modelName, "/"); ok {
+		cfg := &latest.ModelConfig{
+			Provider: p,
+			Model:    m,
+		}
+		if pd, ok := params.Providers[p]; ok {
+			cfg.BaseURL = pd.BaseURL
+			cfg.TokenKey = pd.TokenKey
+		}
+		return cfg, nil
+	}
+
+	return nil, fmt.Errorf("model %q not found in .cgt definitions and not a provider/model reference", modelName)
+}
+
+// workflowContextPrompt explains the execution model to agents so they
+// understand their role in the pipeline and how their output is used.
+const workflowContextPrompt = `You are a step in a workflow pipeline. Here is how it works:
+
+- You receive INPUT DATA below from previous steps in the pipeline.
+- Your TEXT RESPONSE is your output. It will be passed as input to downstream steps.
+- Write your response directly — your text IS the primary deliverable.
+- You may also have graph database tools (graph_put, graph_get, etc.) for storing structured data persistently. Use them when you want to store rich metadata, build relationships between entities, or preserve data that doesn't fit naturally in prose. When you store data in the graph, mention the node IDs and types in your text response so downstream steps know what's available and can retrieve it with graph_get.`
+
+// mcpToolToCagentTool converts a graph MCP tool definition into a cagent Tool
+// with a handler that routes calls back through the graph's ToolCallFunc.
+func mcpToolToCagentTool(mt graphagent.MCPTool, callFn graphagent.ToolCallFunc) tools.Tool {
+	// Parse the input schema into a map for the cagent tool definition.
+	var schema any
+	if len(mt.InputSchema) > 0 {
+		_ = json.Unmarshal(mt.InputSchema, &schema)
+	}
+
+	return tools.Tool{
+		Name:        mt.Name,
+		Category:    "graph",
+		Description: mt.Description,
+		Parameters:  schema,
+		Handler: func(ctx context.Context, tc tools.ToolCall) (*tools.ToolCallResult, error) {
+			result, err := callFn(ctx, tc.Function.Name, []byte(tc.Function.Arguments))
+			if err != nil {
+				return tools.ResultError(err.Error()), nil
+			}
+			return tools.ResultSuccess(result), nil
+		},
+	}
 }
 
 // Ensure Result and engine.ExecutionResult stay in sync at compile time.
