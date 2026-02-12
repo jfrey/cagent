@@ -1,8 +1,10 @@
 module github.com/docker/cagent
 
-go 1.25.5
+go 1.25.6
 
 replace github.com/charmbracelet/ultraviolet => github.com/dgageot/ultraviolet v0.0.0-20260106070720-e493364e381d
+
+replace github.com/docker/cagent-graph => ../cagent-graph
 
 require (
 	charm.land/bubbles/v2 v2.0.0-rc.1
@@ -29,6 +31,7 @@ require (
 	github.com/clipperhouse/displaywidth v0.10.0
 	github.com/clipperhouse/uax29/v2 v2.6.0
 	github.com/coder/acp-go-sdk v0.6.3
+	github.com/docker/cagent-graph v0.0.0-00010101000000-000000000000
 	github.com/docker/go-units v0.5.0
 	github.com/dop251/goja v0.0.0-20260106131823-651366fbe6e3
 	github.com/fatih/color v1.18.0
@@ -70,7 +73,7 @@ require (
 	google.golang.org/protobuf v1.36.11
 	gopkg.in/dnaeon/go-vcr.v4 v4.0.6
 	gotest.tools/v3 v3.5.2
-	modernc.org/sqlite v1.44.3
+	modernc.org/sqlite v1.45.0
 )
 
 require (
@@ -149,6 +152,7 @@ require (
 	github.com/grpc-ecosystem/grpc-gateway/v2 v2.27.7 // indirect
 	github.com/inconshreveable/mousetrap v1.1.0 // indirect
 	github.com/jbenet/go-context v0.0.0-20150711004518-d14ea06fba99 // indirect
+	github.com/jinzhu/inflection v1.0.0 // indirect
 	github.com/json-iterator/go v0.0.0-20171115153421-f7279a603ede // indirect
 	github.com/kevinburke/ssh_config v1.2.0 // indirect
 	github.com/klauspost/compress v1.18.1 // indirect
@@ -165,6 +169,7 @@ require (
 	github.com/opencontainers/image-spec v1.1.1 // indirect
 	github.com/pjbgf/sha1cd v0.3.2 // indirect
 	github.com/pmezard/go-difflib v1.0.0 // indirect
+	github.com/puzpuzpuz/xsync/v3 v3.5.1 // indirect
 	github.com/remyoudompheng/bigfft v0.0.0-20230129092748-24d4a6f8daec // indirect
 	github.com/sergi/go-diff v1.4.0 // indirect
 	github.com/sirupsen/logrus v1.9.3 // indirect
@@ -175,9 +180,14 @@ require (
 	github.com/tidwall/match v1.1.1 // indirect
 	github.com/tidwall/pretty v1.2.1 // indirect
 	github.com/tidwall/sjson v1.2.5 // indirect
+	github.com/tmthrgd/go-hex v0.0.0-20190904060850-447a3041c3bc // indirect
+	github.com/uptrace/bun v1.2.16 // indirect
+	github.com/uptrace/bun/dialect/sqlitedialect v1.2.16 // indirect
 	github.com/valyala/bytebufferpool v1.0.0 // indirect
 	github.com/valyala/fasttemplate v1.2.2 // indirect
 	github.com/vbatts/tar-split v0.12.2 // indirect
+	github.com/vmihailenco/msgpack/v5 v5.4.1 // indirect
+	github.com/vmihailenco/tagparser/v2 v2.0.0 // indirect
 	github.com/xanzy/ssh-agent v0.3.3 // indirect
 	github.com/xeipuuv/gojsonpointer v0.0.0-20180127040702-4e3ac2762d5f // indirect
 	github.com/xeipuuv/gojsonreference v0.0.0-20180127040603-bd5ef7bd5415 // indirect
