@@ -276,6 +276,11 @@ type ModelConfig struct {
 	// - For Anthropic: accepts integer token budget (1024-32000)
 	// - For other providers: may be ignored
 	ThinkingBudget *ThinkingBudget `json:"thinking_budget,omitempty"`
+	// ContextLimit overrides the context window size (in tokens) for this model.
+	// When set, this value is used for session compaction instead of looking up
+	// the limit from models.dev. Useful for custom providers or proxied models
+	// where the automatic lookup cannot resolve the model.
+	ContextLimit *int64 `json:"context_limit,omitempty"`
 	// Routing defines rules for routing requests to different models.
 	// When routing is configured, this model becomes a rule-based router:
 	// - The provider/model fields define the fallback model

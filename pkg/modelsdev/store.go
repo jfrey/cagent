@@ -194,9 +194,33 @@ func (s *Store) GetModel(ctx context.Context, id string) (*Model, error) {
 				}
 			}
 		}
+
+		// For proxied models where the model field encodes the real provider
+		// (e.g., provider="openai" model="anthropic/claude-haiku-4-5" via a gateway),
+		// try parsing the model string itself as a provider/model pair.
+		if realProvider, realModel, ok := strings.Cut(modelID, "/"); ok {
+			if m, err := s.getModelDirect(ctx, realProvider, realModel); err == nil {
+				return m, nil
+			}
+		}
+
 		return nil, fmt.Errorf("model %q not found in provider %q", modelID, providerID)
 	}
 
+	return &model, nil
+}
+
+// getModelDirect looks up a model by explicit provider and model name,
+// without going through the full ID parsing logic.
+func (s *Store) getModelDirect(ctx context.Context, providerID, modelID string) (*Model, error) {
+	provider, err := s.GetProvider(ctx, providerID)
+	if err != nil {
+		return nil, err
+	}
+	model, exists := provider.Models[modelID]
+	if !exists {
+		return nil, fmt.Errorf("model %q not found in provider %q", modelID, providerID)
+	}
 	return &model, nil
 }
 

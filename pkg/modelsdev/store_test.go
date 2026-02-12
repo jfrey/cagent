@@ -68,6 +68,55 @@ func TestResolveModelAlias(t *testing.T) {
 	}
 }
 
+func TestGetModelProxiedFallback(t *testing.T) {
+	t.Parallel()
+
+	mockData := &Database{
+		Providers: map[string]Provider{
+			"openai": {
+				Models: map[string]Model{
+					"gpt-4o": {Name: "GPT-4o", Limit: Limit{Context: 128000}},
+				},
+			},
+			"anthropic": {
+				Models: map[string]Model{
+					"claude-haiku-4-5": {Name: "Claude Haiku 4.5", Limit: Limit{Context: 200000}},
+					"claude-sonnet-4-5": {Name: "Claude Sonnet 4.5", Limit: Limit{Context: 200000}},
+				},
+			},
+		},
+	}
+
+	store, err := NewStore(WithCacheDir(t.TempDir()))
+	require.NoError(t, err)
+	store.SetDatabaseForTesting(mockData)
+
+	ctx := t.Context()
+
+	// Direct lookup works as before.
+	m, err := store.GetModel(ctx, "openai/gpt-4o")
+	require.NoError(t, err)
+	assert.Equal(t, "GPT-4o", m.Name)
+	assert.Equal(t, 128000, m.Limit.Context)
+
+	// Proxied model: provider=openai but model=anthropic/claude-haiku-4-5.
+	// The initial lookup under openai fails, fallback parses the model string
+	// as anthropic/claude-haiku-4-5 and finds it.
+	m, err = store.GetModel(ctx, "openai/anthropic/claude-haiku-4-5")
+	require.NoError(t, err)
+	assert.Equal(t, "Claude Haiku 4.5", m.Name)
+	assert.Equal(t, 200000, m.Limit.Context)
+
+	// Same for sonnet.
+	m, err = store.GetModel(ctx, "openai/anthropic/claude-sonnet-4-5")
+	require.NoError(t, err)
+	assert.Equal(t, "Claude Sonnet 4.5", m.Name)
+
+	// Unknown model still fails.
+	_, err = store.GetModel(ctx, "openai/unknown/model")
+	assert.Error(t, err)
+}
+
 func TestDatePattern(t *testing.T) {
 	t.Parallel()
 

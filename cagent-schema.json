@@ -542,6 +542,11 @@
             32768
           ]
         },
+        "context_limit": {
+          "type": "integer",
+          "description": "Override the context window size (in tokens) for this model. When set, this value is used for session compaction instead of looking up the limit from models.dev. Useful for custom providers or proxied models.",
+          "minimum": 1
+        },
         "routing": {
           "type": "array",
           "description": "Routing rules for request-based model selection. When configured, this model becomes a router that selects the best model based on the user's input. The model's provider/model fields define the fallback model.",

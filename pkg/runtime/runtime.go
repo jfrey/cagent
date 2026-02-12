@@ -993,11 +993,14 @@ func (r *LocalRuntime) RunStream(ctx context.Context, sess *session.Session) <-c
 			}
 
 			var contextLimit int64
-			if m != nil {
+			// Prefer explicit context_limit from model config over models.dev lookup.
+			if cl := model.BaseConfig().ModelConfig.ContextLimit; cl != nil && *cl > 0 {
+				contextLimit = *cl
+			} else if m != nil {
 				contextLimit = int64(m.Limit.Context)
 			}
 
-			if m != nil && r.sessionCompaction {
+			if contextLimit > 0 && r.sessionCompaction {
 				if sess.InputTokens+sess.OutputTokens > int64(float64(contextLimit)*0.9) {
 					r.Summarize(ctx, sess, "", events)
 					events <- TokenUsage(sess.ID, r.currentAgent, sess.InputTokens, sess.OutputTokens, sess.InputTokens+sess.OutputTokens, contextLimit, sess.Cost)
