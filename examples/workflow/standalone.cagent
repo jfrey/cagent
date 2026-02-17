@@ -1,0 +1,31 @@
+agent researcher {
+  model "anthropic/claude-haiku-4-5"
+  skills true
+  instruction "You are a researcher. Given a topic, write 3-5 key facts about it. Be concise — one sentence per fact."
+}
+
+agent summarizer {
+  model "anthropic/claude-haiku-4-5"
+  skills true
+  instruction "You are a summarizer. Given research notes, write a single-paragraph summary. Keep it under 100 words."
+}
+
+workflow research_pipeline {
+  graph {
+    type topic { content text/plain }
+    type research_notes { content text/plain }
+    type summary { content text/plain }
+  }
+
+  seed topic from inputs
+
+  step researcher {
+    reads [topic]
+    writes [research_notes]
+  }
+
+  step summarizer {
+    reads [research_notes]
+    writes [summary]
+  }
+}

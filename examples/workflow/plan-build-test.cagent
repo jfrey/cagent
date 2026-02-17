@@ -1,0 +1,145 @@
+// plan-build-test.cgt
+//
+// Outer loop: reviewer verifies requirements
+//   Inner loop: developer builds/fixes, tester validates
+//
+// Flow:
+//   feature_request → assessor → assessment → planner → plan
+//     → developer → code → tester ⟲ developer (until tests pass)
+//     → reviewer (until requirements met)
+//       → developer fix → tester ⟲ developer (until tests pass)
+//       → reviewer re-checks
+
+agent assessor {
+  instruction "Analyze the feature request and extract clear, testable requirements.
+    Output a numbered list where each requirement is specific and verifiable.
+    Focus on functional requirements, edge cases, and acceptance criteria."
+}
+
+agent planner {
+  instruction "Create a detailed implementation plan from the assessment. Include:
+    1. Files to create or modify
+    2. Key function and type signatures
+    3. Test strategy — what to test and how
+    4. Implementation order with dependencies first
+    Examine the existing codebase structure before planning."
+  toolset filesystem {}
+}
+
+agent developer {
+  instruction "You are a software developer. Implement, fix, and improve code
+    based on whatever context you are given — whether that is an initial plan,
+    failing test output, or reviewer feedback. Follow existing codebase patterns.
+    Write both production code and tests. Ensure the code compiles."
+  toolset shell {}
+  toolset filesystem {}
+}
+
+agent tester {
+  instruction "Run the project test suite. Execute build and tests.
+    Report pass/fail clearly. Set the passed metadata to true
+    ONLY if ALL tests pass with zero failures."
+  toolset shell {}
+}
+
+agent reviewer {
+  instruction "Review the implementation against the original assessment requirements.
+    For EACH numbered requirement, explicitly state whether it is MET or NOT MET
+    with evidence from the code. Set requirements_met to true ONLY if every
+    requirement is satisfied. When requirements are not met, provide specific
+    actionable feedback describing exactly what needs to change."
+  toolset filesystem {}
+}
+
+workflow plan_build_test {
+  config {
+    model "anthropic/claude-sonnet-4-5-20250929"
+    max_budget_usd 5.00
+    timeout 30m
+  }
+
+  graph {
+    type feature_request { content text/plain }
+    type assessment { content text/markdown }
+    type plan { content text/markdown }
+    type code { content text/markdown }
+    type test_result {
+      metadata passed: bool
+      content text/plain
+    }
+    type review {
+      metadata requirements_met: bool
+      content text/markdown
+    }
+  }
+
+  seed feature_request from inputs
+
+  // Phase 1: Extract requirements
+  step assessor {
+    reads [feature_request]
+    writes [assessment]
+  }
+
+  // Phase 2: Plan
+  step planner {
+    reads [assessment]
+    writes [plan]
+    timeout 5m
+  }
+
+  // Phase 3: Initial build
+  step developer {
+    reads [plan]
+    writes [code]
+    timeout 15m
+  }
+
+  // Phase 4: Initial test-fix loop
+  step tester {
+    reads [code]
+    writes [test_result]
+    loop max 5 until latest(test_result).passed == true
+    timeout 3m
+  }
+
+  step developer {
+    reads [test_result]
+    writes []
+    when latest(test_result).passed == false
+    timeout 10m
+  }
+
+  // Phase 5: Review loop (outer) — re-triggers dev/test when requirements not met
+  step reviewer {
+    reads [test_result, assessment]
+    writes [review]
+    loop max 3 until latest(review).requirements_met == true
+    timeout 5m
+  }
+
+  // Review-fix: developer addresses feedback and writes new code
+  step developer {
+    reads [review]
+    writes [code]
+    when latest(review).requirements_met == false
+    timeout 10m
+  }
+
+  // Re-test after review fix
+  step tester {
+    reads [code]
+    writes [test_result]
+    loop max 5 until latest(test_result).passed == true
+    when latest(review).requirements_met == false
+    timeout 3m
+  }
+
+  // Fix test failures within the review cycle
+  step developer {
+    reads [test_result]
+    writes []
+    when latest(test_result).passed == false
+    timeout 10m
+  }
+}

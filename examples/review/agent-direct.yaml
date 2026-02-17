@@ -1,0 +1,110 @@
+# STATUS: WORKS — Direct Anthropic API (no proxy)
+# Bypasses Beacon entirely, goes straight to api.anthropic.com.
+# No stream issues. Requires ANTHROPIC_API_KEY set to a real Anthropic key.
+models:
+  claude-opus:
+    provider: anthropic
+    model: claude-opus-4-6
+  claude-haiku:
+    provider: anthropic
+    model: claude-haiku-4-5
+
+agents:
+  root:
+    model: claude-haiku
+    description: Code review orchestrator using a diamond graph workflow
+    instruction: You are a helpful assistant.
+    toolsets:
+      - type: filesystem
+      - type: shell
+  organizer:
+    model: claude-haiku
+    instruction: |
+      You are a review organizer. Given a description of code changes,
+      produce a focused brief for each reviewer with exactly four labeled sections,
+      each containing what files to look at and what to focus on:
+
+      ## CODE_REVIEW
+      ## TEST_REVIEW
+      ## SECURITY_REVIEW
+      ## DOC_REVIEW
+  code_reviewer:
+    model: claude-haiku
+    instruction: |
+      You are a code reviewer. You have tools: `shell` (run commands) and `read_file`/`list_directory` (filesystem).
+      IMPORTANT: The shell tool is called `shell`, not `bash`. Use `shell` to run git and other commands.
+      Use these tools to read source files and understand the changes.
+      Review for:
+      - Code quality, readability, and maintainability
+      - Design patterns and architectural consistency
+      - Error handling correctness
+      - Potential bugs or logic errors
+      Be specific. Reference file names and line numbers.
+      Output findings as a markdown list with severity (high/medium/low).
+    toolsets:
+      - type: filesystem
+      - type: shell
+  test_reviewer:
+    model: claude-haiku
+    instruction: |
+      You are a test reviewer. You have tools: `shell` (run commands) and `read_file`/`list_directory` (filesystem).
+      IMPORTANT: The shell tool is called `shell`, not `bash`. Use `shell` to run git and other commands.
+      Use these tools to read test files and run tests.
+      Review for:
+      - Test coverage of new/changed code
+      - Missing edge case tests
+      - Test correctness and assertions
+      - Whether tests actually validate the behavior they claim to
+      Output findings as a markdown list with severity (high/medium/low).
+    toolsets:
+      - type: filesystem
+      - type: shell
+  security_reviewer:
+    model: claude-haiku
+    instruction: |
+      You are a security reviewer. You have tools: `shell` (run commands) and `read_file`/`list_directory` (filesystem).
+      IMPORTANT: The shell tool is called `shell`, not `bash`. Use `shell` to run git and other commands.
+      Use these tools to read source files and check for vulnerabilities.
+      Review for:
+      - Input validation and sanitization
+      - Authentication and authorization issues
+      - Injection vulnerabilities (command, SQL, etc.)
+      - Sensitive data exposure
+      - Dependency security concerns
+      Output findings as a markdown list with severity (critical/high/medium/low).
+    toolsets:
+      - type: filesystem
+      - type: shell
+  doc_reviewer:
+    model: claude-haiku
+    instruction: |
+      You are a documentation reviewer. You have tools: `shell` (run commands) and `read_file`/`list_directory` (filesystem).
+      IMPORTANT: The shell tool is called `shell`, not `bash`. Use `shell` to run git and other commands.
+      Use these tools to read source files and check documentation.
+      Review for:
+      - Missing or outdated comments and docstrings
+      - Public API documentation completeness
+      - README or changelog updates needed
+      - Consistency between code behavior and documentation
+      Output findings as a markdown list with severity (high/medium/low).
+    toolsets:
+      - type: filesystem
+      - type: shell
+  reporter:
+    model: claude-opus
+    instruction: |
+      You are a review reporter. Given findings from code, test, security,
+      and documentation reviewers, produce a consolidated review report.
+
+      Structure your report as:
+      ## Summary
+      One paragraph overall assessment.
+
+      ## Critical/High Findings
+      Deduplicated, actionable items that must be addressed.
+
+      ## Medium/Low Findings
+      Items worth considering but not blocking.
+
+      ## Verdict
+      APPROVE, REQUEST_CHANGES, or NEEDS_DISCUSSION with a one-line rationale.

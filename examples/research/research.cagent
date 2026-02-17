@@ -1,0 +1,108 @@
+agent planner {
+  model "anthropic/claude-haiku-4-5"
+  skills true
+  instruction "You are a research planner. Given a question, decompose it into 3 distinct investigation angles. For each angle, specify what to investigate and why it matters. Output a structured plan with numbered sections."
+}
+
+agent deep_investigator {
+  model "anthropic/claude-haiku-4-5"
+  skills true
+  toolset mcp {
+    command "npx"
+    args ["-y", "duckduckgo-mcp-server"]
+  }
+  instruction "You are a deep technical investigator. You have a web search tool — use it to find real data, studies, and technical details. Investigate the topic thoroughly from a technical depth perspective. Cite your sources with URLs. Be thorough but concise."
+}
+
+agent contrarian_investigator {
+  model "anthropic/claude-haiku-4-5"
+  skills true
+  toolset mcp {
+    command "npx"
+    args ["-y", "duckduckgo-mcp-server"]
+  }
+  instruction "You are a contrarian investigator. You have a web search tool — use it to find counterevidence, criticism, and dissenting views. Investigate by looking for counterarguments, risks, limitations, and overlooked downsides. Cite your sources with URLs. Be specific about what could go wrong."
+}
+
+agent practical_investigator {
+  model "anthropic/claude-haiku-4-5"
+  skills true
+  toolset mcp {
+    command "npx"
+    args ["-y", "duckduckgo-mcp-server"]
+  }
+  instruction "You are a practical investigator. You have a web search tool — use it to find real-world case studies, adoption data, and practitioner experiences. Focus on what practitioners actually experience versus what theory suggests. Cite your sources with URLs."
+}
+
+agent synthesizer {
+  model "anthropic/claude-opus-4-6"
+  skills true
+  instruction "You are a research synthesizer. Given evidence from multiple investigators with different perspectives (technical, contrarian, practical), produce a balanced draft synthesis. Identify areas of agreement and tension. Structure with clear sections and highlight key insights. Preserve source URLs from the evidence."
+}
+
+agent critic {
+  model "anthropic/claude-haiku-4-5"
+  skills true
+  instruction "You are a research critic. Evaluate the draft for: unsupported claims, logical gaps, missing perspectives, overconfidence, and factual errors. Be specific about what needs fixing. Rate overall quality as STRONG, ADEQUATE, or WEAK."
+}
+
+agent reviser {
+  model "anthropic/claude-opus-4-6"
+  skills true
+  instruction "You are a research reviser. Given a draft and critique, produce the final polished report. Address every issue raised by the critic. Strengthen weak claims with hedging, remove unsupported assertions, and fill gaps. The final report should be authoritative but honest about uncertainty. Output the complete report as your response. Include a Sources section at the end with all cited URLs."
+}
+
+workflow research_pipeline {
+  config {
+    max_budget_usd 3.00
+  }
+
+  graph {
+    type question       { content text/plain }
+    type plan           { content text/markdown }
+    type evidence       { content text/markdown }
+    type draft          { content text/markdown }
+    type critique       { content text/markdown }
+    type report         { content text/markdown }
+  }
+
+  seed question from inputs
+
+  step planner {
+    reads  [question]
+    writes [plan]
+  }
+
+  step deep_investigator {
+    reads  [plan]
+    writes [evidence]
+    on_failure passthrough
+  }
+
+  step contrarian_investigator {
+    reads  [plan]
+    writes [evidence]
+    on_failure passthrough
+  }
+
+  step practical_investigator {
+    reads  [plan]
+    writes [evidence]
+    on_failure passthrough
+  }
+
+  step synthesizer {
+    reads  [evidence]
+    writes [draft]
+  }
+
+  step critic {
+    reads  [draft, evidence]
+    writes [critique]
+  }
+
+  step reviser {
+    reads  [draft, critique]
+    writes [report]
+  }
+}

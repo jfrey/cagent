@@ -50,20 +50,20 @@ func newWorkflowRunCmd() *cobra.Command {
 
 	cmd := &cobra.Command{
 		Use:   "run <graph-file>",
-		Short: "Execute a .cgt workflow",
-		Long: `Execute a .cgt workflow file. Agent, model, and provider definitions
-can be embedded directly in the .cgt file. Use --agents to provide
+		Short: "Execute a .cagent workflow",
+		Long: `Execute a .cagent workflow file. Agent, model, and provider definitions
+can be embedded directly in the .cagent file. Use --agents to provide
 additional model/agent configuration from a YAML file (e.g., for
 custom API endpoints or credentials).`,
-		Example: `  cagent workflow run ./pipeline.cgt --input topic="Docker containers"
-  cagent workflow run ./review.cgt --agents ./models.yaml --input prompt="Review this"
-  cagent workflow run ./research.cgt --input question="What is the best search API?"`,
+		Example: `  cagent workflow run ./pipeline.cagent --input topic="Docker containers"
+  cagent workflow run ./review.cagent --agents ./models.yaml --input prompt="Review this"
+  cagent workflow run ./research.cagent --input question="What is the best search API?"`,
 		Args: cobra.ExactArgs(1),
 		RunE: flags.runWorkflow,
 	}
 
 	cmd.Flags().StringArrayVar(&flags.inputs, "input", nil, "Seed graph input as type=content (repeatable)")
-	cmd.Flags().StringVar(&flags.agents, "agents", "", "Agent/model configuration YAML file (optional if .cgt defines models)")
+	cmd.Flags().StringVar(&flags.agents, "agents", "", "Agent/model configuration YAML file (optional if .cagent defines models)")
 	cmd.Flags().StringVar(&flags.dbPath, "db", "", "Path to SQLite graph database (persists between runs; default: ephemeral)")
 	addRuntimeConfigFlags(cmd, &flags.runConfig)
 
@@ -86,7 +86,7 @@ func (f *workflowRunFlags) runWorkflow(cmd *cobra.Command, args []string) error 
 		inputs[k] = v
 	}
 
-	// Load agent team — either from --agents file or we'll build one from the .cgt file later.
+	// Load agent team — either from --agents file or we'll build one from the .cagent file later.
 	var loadResult *teamloader.LoadResult
 	if f.agents != "" {
 		agentSource, err := config.Resolve(f.agents, f.runConfig.EnvProvider())
@@ -120,7 +120,7 @@ func (f *workflowRunFlags) runWorkflow(cmd *cobra.Command, args []string) error 
 	}
 
 	// Run workflow. If no --agents file, pass nil team — the executor will
-	// build agents from the .cgt file's definitions via AgentParams.
+	// build agents from the .cagent file's definitions via AgentParams.
 	var exec *workflow.Executor
 	if loadResult != nil {
 		exec = workflow.New(loadResult.Team, execOpts...)
@@ -160,11 +160,11 @@ func (f *workflowRunFlags) runWorkflow(cmd *cobra.Command, args []string) error 
 func newWorkflowLintCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "lint <graph-file>",
-		Short: "Validate a .cgt workflow file",
-		Long: `Parse and validate a .cgt workflow file without executing it.
+		Short: "Validate a .cagent workflow file",
+		Long: `Parse and validate a .cagent workflow file without executing it.
 Checks for syntax errors, type mismatches, and other issues.`,
-		Example: `  cagent workflow lint ./pipeline.cgt
-  cagent workflow lint ./review.cgt`,
+		Example: `  cagent workflow lint ./pipeline.cagent
+  cagent workflow lint ./review.cagent`,
 		Args: cobra.ExactArgs(1),
 		RunE: runWorkflowLint,
 	}
@@ -198,13 +198,13 @@ func newWorkflowDescribeCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "describe <graph-file>",
 		Short: "Show detailed information about a workflow",
-		Long: `Parse a .cgt workflow file and display detailed information including:
+		Long: `Parse a .cagent workflow file and display detailed information including:
 - Workflow configuration (model, retries, etc.)
 - Node types and their content types
 - Steps with their agents, inputs, and outputs
 - Agent, provider, and model definitions`,
-		Example: `  cagent workflow describe ./pipeline.cgt
-  cagent workflow describe ./review.cgt`,
+		Example: `  cagent workflow describe ./pipeline.cagent
+  cagent workflow describe ./review.cagent`,
 		Args: cobra.ExactArgs(1),
 		RunE: runWorkflowDescribe,
 	}
@@ -328,11 +328,11 @@ func newWorkflowInitCmd() *cobra.Command {
 	cmd := &cobra.Command{
 		Use:   "init [filename]",
 		Short: "Create a new workflow file from a template",
-		Long: `Generate a new .cgt workflow file with a basic template structure.
-If no filename is provided, creates 'workflow.cgt' in the current directory.`,
+		Long: `Generate a new .cagent workflow file with a basic template structure.
+If no filename is provided, creates 'workflow.cagent' in the current directory.`,
 		Example: `  cagent workflow init
-  cagent workflow init pipeline.cgt
-  cagent workflow init research/analysis.cgt`,
+  cagent workflow init pipeline.cagent
+  cagent workflow init research/analysis.cagent`,
 		Args: cobra.MaximumNArgs(1),
 		RunE: runWorkflowInit,
 	}
@@ -343,7 +343,7 @@ If no filename is provided, creates 'workflow.cgt' in the current directory.`,
 func runWorkflowInit(cmd *cobra.Command, args []string) error {
 	telemetry.TrackCommand("workflow init", nil)
 
-	filename := "workflow.cgt"
+	filename := "workflow.cagent"
 	if len(args) > 0 {
 		filename = args[0]
 	}
@@ -510,7 +510,7 @@ func newWorkflowResumeCmd() *cobra.Command {
 Automatically detects resumable workflows in the database.`,
 		Example: `  cagent workflow resume ./workflow.db
   cagent workflow resume ./workflow.db --namespace research-pipeline-123
-  cagent workflow resume ./workflow.db --clean --workflow pipeline.cgt`,
+  cagent workflow resume ./workflow.db --clean --workflow pipeline.cagent`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runWorkflowResume(cmd, args[0], namespace, clean, allowChanges, workflowFile)

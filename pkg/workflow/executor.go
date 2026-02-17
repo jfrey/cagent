@@ -71,7 +71,7 @@ func WithRunConfig(cfg *config.RuntimeConfig) Option {
 	}
 }
 
-// Executor runs .cgt workflows using cagent's agent system.
+// Executor runs .cagent workflows using cagent's agent system.
 type Executor struct {
 	team      *team.Team
 	agentFn   graphagent.AgentFunc
@@ -92,7 +92,7 @@ func New(t *team.Team, opts ...Option) *Executor {
 	return e
 }
 
-// RunFile compiles and executes a .cgt workflow file. Inputs are seeded
+// RunFile compiles and executes a .cagent workflow file. Inputs are seeded
 // into the graph before execution; map keys are node types and values are
 // content strings.
 func (e *Executor) RunFile(ctx context.Context, graphFile string, inputs map[string]string) (*Result, error) {
@@ -109,7 +109,7 @@ func (e *Executor) RunFile(ctx context.Context, graphFile string, inputs map[str
 	return e.run(ctx, r, inputs)
 }
 
-// RunSource compiles and executes .cgt source bytes.
+// RunSource compiles and executes .cagent source bytes.
 func (e *Executor) RunSource(ctx context.Context, src []byte, inputs map[string]string) (*Result, error) {
 	r, cleanup, err := e.newRunner()
 	if err != nil {
@@ -205,7 +205,7 @@ func (e *Executor) run(ctx context.Context, r *runner.Runner, inputs map[string]
 //
 // When a team is provided (--agents), the graph step name is matched against
 // the team's named agents. When no team exists, agents are built on-the-fly
-// from the .cgt file's agent/model/provider definitions in AgentParams.
+// from the .cagent file's agent/model/provider definitions in AgentParams.
 func (e *Executor) defaultAgentFunc(ctx context.Context, params graphagent.AgentParams) (*graphagent.AgentResult, error) {
 	// Convert graph MCP tools to cagent tools with handlers that route
 	// back to the graph via params.ToolCall.
@@ -224,7 +224,7 @@ func (e *Executor) defaultAgentFunc(ctx context.Context, params graphagent.Agent
 
 	// Build the system message from:
 	// 1. Workflow execution context (how the pipeline works)
-	// 2. Agent instruction (from .cgt or agent.yaml)
+	// 2. Agent instruction (from .cagent or agent.yaml)
 	// 3. Prompt data from the graph engine (node content to process)
 	var systemParts []string
 	systemParts = append(systemParts, workflowContextPrompt)
@@ -270,7 +270,7 @@ func (e *Executor) defaultAgentFunc(ctx context.Context, params graphagent.Agent
 
 // buildRuntime creates a LocalRuntime for a workflow step. When a team exists
 // (from --agents), it uses the team's agents. When no team exists, it builds
-// an agent on-the-fly from the .cgt file's definitions.
+// an agent on-the-fly from the .cagent file's definitions.
 func (e *Executor) buildRuntime(ctx context.Context, params graphagent.AgentParams, graphTools []tools.Tool) (*runtime.LocalRuntime, string, int, error) {
 	if e.team != nil {
 		return e.buildRuntimeFromTeam(ctx, params, graphTools)
@@ -298,7 +298,7 @@ func (e *Executor) buildRuntimeFromTeam(ctx context.Context, params graphagent.A
 		return nil, "", 0, fmt.Errorf("create runtime for step %s: %w", params.Agent, err)
 	}
 
-	// .cgt instruction is canonical; fall back to team agent.
+	// .cagent instruction is canonical; fall back to team agent.
 	instruction := params.Instruction
 	if instruction == "" {
 		instruction = a.Instruction()
@@ -312,14 +312,14 @@ func (e *Executor) buildRuntimeFromTeam(ctx context.Context, params graphagent.A
 	return rt, instruction, maxIter, nil
 }
 
-// buildRuntimeFromGraph creates a runtime from the .cgt file's agent/model/provider
+// buildRuntimeFromGraph creates a runtime from the .cagent file's agent/model/provider
 // definitions — no agent.yaml needed.
 func (e *Executor) buildRuntimeFromGraph(ctx context.Context, params graphagent.AgentParams, graphTools []tools.Tool) (*runtime.LocalRuntime, string, int, error) {
 	if params.AgentDef == nil {
-		return nil, "", 0, fmt.Errorf("step %s: no agent definition (provide --agents or define agents in .cgt)", params.Agent)
+		return nil, "", 0, fmt.Errorf("step %s: no agent definition (provide --agents or define agents in .cagent)", params.Agent)
 	}
 
-	// Resolve the model config from .cgt definitions.
+	// Resolve the model config from .cagent definitions.
 	modelCfg, err := resolveModelConfig(params)
 	if err != nil {
 		return nil, "", 0, fmt.Errorf("step %s: %w", params.Agent, err)
@@ -332,7 +332,7 @@ func (e *Executor) buildRuntimeFromGraph(ctx context.Context, params graphagent.
 		return nil, "", 0, fmt.Errorf("step %s: create provider: %w", params.Agent, err)
 	}
 
-	// Convert toolsets from .cgt to cagent toolsets
+	// Convert toolsets from .cagent to cagent toolsets
 	var agentOpts []cagent.Opt
 	agentOpts = append(agentOpts,
 		cagent.WithModel(p),
@@ -385,7 +385,7 @@ func (e *Executor) buildRuntimeFromGraph(ctx context.Context, params graphagent.
 	return rt, params.Instruction, params.AgentDef.MaxIterations, nil
 }
 
-// resolveModelConfig converts .cgt model/provider definitions into a
+// resolveModelConfig converts .cagent model/provider definitions into a
 // latest.ModelConfig that cagent's provider system understands.
 func resolveModelConfig(params graphagent.AgentParams) (*latest.ModelConfig, error) {
 	modelName := params.Model
@@ -396,7 +396,7 @@ func resolveModelConfig(params graphagent.AgentParams) (*latest.ModelConfig, err
 		return nil, fmt.Errorf("no model specified")
 	}
 
-	// Check if the model name references a .cgt model definition.
+	// Check if the model name references a .cagent model definition.
 	if md, ok := params.Models[modelName]; ok {
 		cfg := &latest.ModelConfig{
 			Provider: md.Provider,
@@ -445,7 +445,7 @@ func resolveModelConfig(params graphagent.AgentParams) (*latest.ModelConfig, err
 		return cfg, nil
 	}
 
-	return nil, fmt.Errorf("model %q not found in .cgt definitions and not a provider/model reference", modelName)
+	return nil, fmt.Errorf("model %q not found in .cagent definitions and not a provider/model reference", modelName)
 }
 
 // workflowContextPrompt explains the execution model to agents so they

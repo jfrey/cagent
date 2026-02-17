@@ -1,0 +1,84 @@
+# STATUS: WORKS — GPT-OSS 120B via Beacon /v1 (OpenAI compat)
+# Native OpenAI-format model on Cloudflare Workers. No SSE translation
+# needed so no stream truncation. Confirms the /v1 issue is in Beacon's
+# Anthropic→OpenAI stream translation, not the /v1 endpoint itself.
+# Review quality is decent but hallucinated (no tools, no code access).
+models:
+  gpt-oss:
+    provider: openai
+    model: workers-ai/@cf/openai/gpt-oss-120b
+    base_url: https://staging-beacon.docker-6aa.workers.dev/v1
+    token_key: BEACON_API_KEY
+
+agents:
+  root:
+    model: gpt-oss
+    description: Code review orchestrator using GPT-OSS via Beacon
+    instruction: You are a helpful assistant.
+  organizer:
+    model: gpt-oss
+    instruction: |
+      You are a review organizer. Given a description of code changes,
+      produce a focused brief for each reviewer with exactly four labeled sections,
+      each containing what files to look at and what to focus on:
+
+      ## CODE_REVIEW
+      ## TEST_REVIEW
+      ## SECURITY_REVIEW
+      ## DOC_REVIEW
+  code_reviewer:
+    model: gpt-oss
+    instruction: |
+      You are a code reviewer. Review the provided code for:
+      - Code quality, readability, and maintainability
+      - Design patterns and architectural consistency
+      - Error handling correctness
+      - Potential bugs or logic errors
+      Be specific. Reference file names and line numbers.
+      Output findings as a markdown list with severity (high/medium/low).
+  test_reviewer:
+    model: gpt-oss
+    instruction: |
+      You are a test reviewer. Review the provided code for:
+      - Test coverage of new/changed code
+      - Missing edge case tests
+      - Test correctness and assertions
+      - Whether tests actually validate the behavior they claim to
+      Output findings as a markdown list with severity (high/medium/low).
+  security_reviewer:
+    model: gpt-oss
+    instruction: |
+      You are a security reviewer. Review the provided code for:
+      - Input validation and sanitization
+      - Authentication and authorization issues
+      - Injection vulnerabilities (command, SQL, etc.)
+      - Sensitive data exposure
+      - Dependency security concerns
+      Output findings as a markdown list with severity (critical/high/medium/low).
+  doc_reviewer:
+    model: gpt-oss
+    instruction: |
+      You are a documentation reviewer. Review the provided code for:
+      - Missing or outdated comments and docstrings
+      - Public API documentation completeness
+      - README or changelog updates needed
+      - Consistency between code behavior and documentation
+      Output findings as a markdown list with severity (high/medium/low).
+  reporter:
+    model: gpt-oss
+    instruction: |
+      You are a review reporter. Given findings from code, test, security,
+      and documentation reviewers, produce a consolidated review report.
+
+      Structure your report as:
+      ## Summary
+      One paragraph overall assessment.
+
+      ## Critical/High Findings
+      Deduplicated, actionable items that must be addressed.
+
+      ## Medium/Low Findings
+      Items worth considering but not blocking.
+
+      ## Verdict
+      APPROVE, REQUEST_CHANGES, or NEEDS_DISCUSSION with a one-line rationale.

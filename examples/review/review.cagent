@@ -1,0 +1,91 @@
+agent organizer {
+  model "anthropic/claude-haiku-4-5"
+  skills true
+  instruction "You are a review organizer. Given a description of code changes, produce a focused brief for each reviewer with exactly four labeled sections, each containing what files to look at and what to focus on: ## CODE_REVIEW, ## TEST_REVIEW, ## SECURITY_REVIEW, ## DOC_REVIEW"
+}
+
+agent code_reviewer {
+  model "anthropic/claude-haiku-4-5"
+  skills true
+  toolset shell {}
+  toolset filesystem {}
+  instruction "You are a code reviewer. Use the shell and filesystem tools to read source files. Review for code quality, readability, maintainability, design patterns, error handling, and potential bugs. Be specific with file names and line numbers. Output findings as a markdown list with severity (high/medium/low)."
+}
+
+agent test_reviewer {
+  model "anthropic/claude-haiku-4-5"
+  skills true
+  toolset shell {}
+  toolset filesystem {}
+  instruction "You are a test reviewer. Use the shell and filesystem tools to read test files and run tests. Review for test coverage, missing edge cases, test correctness, and whether tests validate what they claim. Output findings as a markdown list with severity (high/medium/low)."
+}
+
+agent security_reviewer {
+  model "anthropic/claude-haiku-4-5"
+  skills true
+  toolset shell {}
+  toolset filesystem {}
+  instruction "You are a security reviewer. Use the shell and filesystem tools to read source files. Review for input validation, auth issues, injection vulnerabilities, sensitive data exposure, and dependency concerns. Output findings as a markdown list with severity (critical/high/medium/low)."
+}
+
+agent doc_reviewer {
+  model "anthropic/claude-haiku-4-5"
+  skills true
+  toolset shell {}
+  toolset filesystem {}
+  instruction "You are a documentation reviewer. Use the shell and filesystem tools to read source files. Review for missing comments, public API documentation, README updates needed, and consistency between code and docs. Output findings as a markdown list with severity (high/medium/low)."
+}
+
+agent reporter {
+  model "anthropic/claude-opus-4-6"
+  skills true
+  instruction "You are a review reporter. Given findings from code, test, security, and documentation reviewers, produce a consolidated review report structured as: ## Summary (one paragraph), ## Critical/High Findings (deduplicated, actionable), ## Medium/Low Findings (worth considering), ## Verdict (APPROVE, REQUEST_CHANGES, or NEEDS_DISCUSSION with rationale)."
+}
+
+workflow code_review {
+  graph {
+    type prompt         { content text/plain }
+    type review_brief   { content text/plain }
+    type code_findings  { content text/plain }
+    type test_findings  { content text/plain }
+    type sec_findings   { content text/plain }
+    type doc_findings   { content text/plain }
+    type report         { content text/plain }
+  }
+
+  seed prompt from inputs
+
+  step organizer {
+    reads  [prompt]
+    writes [review_brief]
+  }
+
+  step code_reviewer {
+    reads  [review_brief]
+    writes [code_findings]
+    on_failure passthrough
+  }
+
+  step test_reviewer {
+    reads  [review_brief]
+    writes [test_findings]
+    on_failure passthrough
+  }
+
+  step security_reviewer {
+    reads  [review_brief]
+    writes [sec_findings]
+    on_failure passthrough
+  }
+
+  step doc_reviewer {
+    reads  [review_brief]
+    writes [doc_findings]
+    on_failure passthrough
+  }
+
+  step reporter {
+    reads  [code_findings, test_findings, sec_findings, doc_findings]
+    writes [report]
+  }
+}
