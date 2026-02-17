@@ -141,9 +141,15 @@ func NewClient(ctx context.Context, cfg *latest.ModelConfig, env environment.Pro
 	}
 
 	if gateway := globalOptions.Gateway(); gateway == "" {
-		authToken, _ := env.Get(ctx, "ANTHROPIC_API_KEY")
+		// Use TokenKey from config, fallback to default
+		tokenKey := cfg.TokenKey
+		if tokenKey == "" {
+			tokenKey = "ANTHROPIC_API_KEY"
+		}
+
+		authToken, _ := env.Get(ctx, tokenKey)
 		if authToken == "" {
-			return nil, errors.New("ANTHROPIC_API_KEY environment variable is required")
+			return nil, fmt.Errorf("%s environment variable is required", tokenKey)
 		}
 
 		slog.Debug("Anthropic API key found, creating client")

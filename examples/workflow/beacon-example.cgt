@@ -1,0 +1,49 @@
+provider beacon-anthropic {
+  api_type "anthropic"
+  base_url "https://staging-beacon.docker-6aa.workers.dev/anthropic"
+  token_key "BEACON_API_KEY"
+}
+
+model claude-opus {
+  provider "beacon-anthropic"
+  model "claude-opus-4-6"
+}
+
+model claude-haiku {
+  provider "beacon-anthropic"
+  model "claude-haiku-4-5"
+}
+
+agent researcher {
+  model "claude-haiku"
+  skills true
+  toolset shell {}
+  toolset filesystem {}
+  instruction "You are a researcher. Given a topic, investigate and provide key findings."
+}
+
+agent synthesizer {
+  model "claude-opus"
+  skills true
+  instruction "You are a synthesizer. Given research findings, create a comprehensive summary."
+}
+
+workflow research_via_beacon {
+  graph {
+    type topic { content text/plain }
+    type findings { content text/markdown }
+    type summary { content text/markdown }
+  }
+
+  seed topic from inputs
+
+  step researcher {
+    reads [topic]
+    writes [findings]
+  }
+
+  step synthesizer {
+    reads [findings]
+    writes [summary]
+  }
+}
