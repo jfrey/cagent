@@ -1,7 +1,7 @@
 package builtin
 
 const (
-	maxOutputSize = 30000
+	maxOutputSize = 10000000 // 10MB
 
 	maxFiles = 100
 )
