@@ -94,8 +94,15 @@ func New(t *team.Team, opts ...Option) *Executor {
 
 // RunFile compiles and executes a .cagent workflow file. Inputs are seeded
 // into the graph before execution; map keys are node types and values are
-// content strings.
+// content strings. If multiple workflows are defined (via imports), runs the
+// last workflow (typically the composed main workflow).
 func (e *Executor) RunFile(ctx context.Context, graphFile string, inputs map[string]string) (*Result, error) {
+	return e.RunFileWithSelection(ctx, graphFile, "", inputs)
+}
+
+// RunFileWithSelection compiles and executes a specific workflow from a .cagent file.
+// If workflowName is empty, auto-selects by filename match or defaults to last workflow.
+func (e *Executor) RunFileWithSelection(ctx context.Context, graphFile string, workflowName string, inputs map[string]string) (*Result, error) {
 	r, cleanup, err := e.newRunner()
 	if err != nil {
 		return nil, fmt.Errorf("create runner: %w", err)
@@ -106,10 +113,15 @@ func (e *Executor) RunFile(ctx context.Context, graphFile string, inputs map[str
 		return nil, fmt.Errorf("compile %s: %w", graphFile, err)
 	}
 
-	return e.run(ctx, r, inputs)
+	// Select which workflow to run
+	workflows := r.Workflows()
+	workflowIdx := selectWorkflow(workflows, graphFile, workflowName)
+
+	return e.runWorkflow(ctx, r, workflowIdx, inputs)
 }
 
 // RunSource compiles and executes .cagent source bytes.
+// Runs the last workflow if multiple are defined.
 func (e *Executor) RunSource(ctx context.Context, src []byte, inputs map[string]string) (*Result, error) {
 	r, cleanup, err := e.newRunner()
 	if err != nil {
@@ -121,7 +133,13 @@ func (e *Executor) RunSource(ctx context.Context, src []byte, inputs map[string]
 		return nil, fmt.Errorf("compile: %w", err)
 	}
 
-	return e.run(ctx, r, inputs)
+	workflows := r.Workflows()
+	workflowIdx := len(workflows) - 1 // Default to last workflow
+	if workflowIdx < 0 {
+		return nil, fmt.Errorf("no workflows defined")
+	}
+
+	return e.runWorkflow(ctx, r, workflowIdx, inputs)
 }
 
 func (e *Executor) newRunner() (*runner.Runner, func(), error) {
@@ -160,16 +178,19 @@ func (e *Executor) newRunner() (*runner.Runner, func(), error) {
 	return r, cleanup, nil
 }
 
-func (e *Executor) run(ctx context.Context, r *runner.Runner, inputs map[string]string) (*Result, error) {
+func (e *Executor) runWorkflow(ctx context.Context, r *runner.Runner, workflowIdx int, inputs map[string]string) (*Result, error) {
 	workflows := r.Workflows()
 	if len(workflows) == 0 {
 		return nil, fmt.Errorf("no workflows defined")
+	}
+	if workflowIdx < 0 || workflowIdx >= len(workflows) {
+		return nil, fmt.Errorf("workflow index %d out of range [0, %d)", workflowIdx, len(workflows))
 	}
 
 	// Generate a run ID so we can seed into the correct namespace.
 	// The runner creates namespace = workflowName + "-" + runID.
 	runID := uuid.New().String()
-	namespace := workflows[0].Name + "-" + runID
+	namespace := workflows[workflowIdx].Name + "-" + runID
 
 	// Seed inputs into the graph.
 	g := r.Graph()
@@ -492,4 +513,37 @@ var _ = func(r *engine.ExecutionResult) *Result {
 		Outputs:    r.Outputs,
 		OutputIDs:  r.OutputIDs,
 	}
+}
+
+// selectWorkflow chooses which workflow to run from a list.
+// Strategy:
+// 1. If workflowName specified, find exact match
+// 2. If filename matches a workflow name, use that
+// 3. Otherwise use last workflow (convention for composed workflows)
+func selectWorkflow(workflows []engine.Workflow, graphFile string, workflowName string) int {
+	if len(workflows) == 0 {
+		return -1
+	}
+
+	// Explicit name provided
+	if workflowName != "" {
+		for i, wf := range workflows {
+			if wf.Name == workflowName {
+				return i
+			}
+		}
+		// Name not found - return error index
+		return -1
+	}
+
+	// Try filename match (implementation.cagent → workflow "implementation")
+	baseName := strings.TrimSuffix(filepath.Base(graphFile), filepath.Ext(graphFile))
+	for i, wf := range workflows {
+		if wf.Name == baseName {
+			return i
+		}
+	}
+
+	// Default: last workflow (convention for composed workflows)
+	return len(workflows) - 1
 }

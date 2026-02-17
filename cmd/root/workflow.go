@@ -41,11 +41,12 @@ func newWorkflowCmd() *cobra.Command {
 }
 
 type workflowRunFlags struct {
-	inputs    []string
-	agents    string
-	dbPath    string
-	ephemeral bool
-	runConfig config.RuntimeConfig
+	inputs       []string
+	agents       string
+	dbPath       string
+	ephemeral    bool
+	workflowName string
+	runConfig    config.RuntimeConfig
 }
 
 const defaultWorkflowDB = ".cagent/workflows.db" // relative to home dir
@@ -80,6 +81,7 @@ custom API endpoints or credentials).`,
 	cmd.Flags().StringVar(&flags.agents, "agents", "", "Agent/model configuration YAML file (optional if .cagent defines models)")
 	cmd.Flags().StringVar(&flags.dbPath, "db", "", "Path to SQLite graph database (default: ~/.cagent/workflows.db)")
 	cmd.Flags().BoolVar(&flags.ephemeral, "ephemeral", false, "Use ephemeral database (deleted after run, disables resume/list/tag)")
+	cmd.Flags().StringVarP(&flags.workflowName, "workflow", "w", "", "Workflow name to execute (default: auto-select by filename or last workflow)")
 	addRuntimeConfigFlags(cmd, &flags.runConfig)
 
 	return cmd
@@ -157,7 +159,8 @@ func (f *workflowRunFlags) runWorkflow(cmd *cobra.Command, args []string) error 
 
 	fmt.Fprintf(cmd.OutOrStdout(), "Running workflow: %s\n", graphFile)
 
-	result, err := exec.RunFile(ctx, graphFile, inputs)
+	// Use the new workflow selection in executor
+	result, err := exec.RunFileWithSelection(ctx, graphFile, f.workflowName, inputs)
 	if err != nil {
 		return fmt.Errorf("workflow failed: %w", err)
 	}
