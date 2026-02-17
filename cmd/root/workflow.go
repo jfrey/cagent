@@ -354,6 +354,7 @@ func runWorkflowInit(cmd *cobra.Command, args []string) error {
 
 	template := `agent analyzer {
   model "gpt-4o"
+  skills true
   instruction "You are a helpful AI assistant that analyzes input and provides detailed insights."
 }
 
