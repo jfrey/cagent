@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -35,6 +36,7 @@ func newWorkflowCmd() *cobra.Command {
 	cmd.AddCommand(newWorkflowResumeCmd())
 	cmd.AddCommand(newWorkflowTagCmd())
 	cmd.AddCommand(newWorkflowListCmd())
+	cmd.AddCommand(newWorkflowPruneCmd())
 	return cmd
 }
 
@@ -42,7 +44,19 @@ type workflowRunFlags struct {
 	inputs    []string
 	agents    string
 	dbPath    string
+	ephemeral bool
 	runConfig config.RuntimeConfig
+}
+
+const defaultWorkflowDB = ".cagent/workflows.db" // relative to home dir
+
+// getDefaultWorkflowDB returns the absolute path to the default workflow database.
+func getDefaultWorkflowDB() (string, error) {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return "", fmt.Errorf("get home directory: %w", err)
+	}
+	return filepath.Join(homeDir, defaultWorkflowDB), nil
 }
 
 func newWorkflowRunCmd() *cobra.Command {
@@ -64,7 +78,8 @@ custom API endpoints or credentials).`,
 
 	cmd.Flags().StringArrayVar(&flags.inputs, "input", nil, "Seed graph input as type=content (repeatable)")
 	cmd.Flags().StringVar(&flags.agents, "agents", "", "Agent/model configuration YAML file (optional if .cagent defines models)")
-	cmd.Flags().StringVar(&flags.dbPath, "db", "", "Path to SQLite graph database (persists between runs; default: ephemeral)")
+	cmd.Flags().StringVar(&flags.dbPath, "db", "", "Path to SQLite graph database (default: ~/.cagent/workflows.db)")
+	cmd.Flags().BoolVar(&flags.ephemeral, "ephemeral", false, "Use ephemeral database (deleted after run, disables resume/list/tag)")
 	addRuntimeConfigFlags(cmd, &flags.runConfig)
 
 	return cmd
@@ -75,6 +90,18 @@ func (f *workflowRunFlags) runWorkflow(cmd *cobra.Command, args []string) error 
 
 	ctx := cmd.Context()
 	graphFile := args[0]
+
+	// Use default database unless --ephemeral or --db specified
+	if f.dbPath == "" && !f.ephemeral {
+		homeDir, err := os.UserHomeDir()
+		if err == nil {
+			f.dbPath = filepath.Join(homeDir, defaultWorkflowDB)
+			// Ensure .cagent directory exists
+			if err := os.MkdirAll(filepath.Dir(f.dbPath), 0755); err != nil {
+				return fmt.Errorf("create workflow database directory: %w", err)
+			}
+		}
+	}
 
 	// Parse inputs.
 	inputs := make(map[string]string)
@@ -406,17 +433,18 @@ workflow example {
 
 func newWorkflowStatusCmd() *cobra.Command {
 	cmd := &cobra.Command{
-		Use:   "status <db-path>",
+		Use:   "status [db-path]",
 		Short: "Show status of a persisted workflow",
 		Long: `Query a workflow database and show execution status including:
 - Number of nodes created
 - Completed vs pending steps
 - Node types and counts
 
-Requires a workflow that was run with the --db flag.`,
-		Example: `  cagent workflow status ./workflow.db
+Defaults to ~/.cagent/workflows.db if no path specified.`,
+		Example: `  cagent workflow status
+  cagent workflow status ./workflow.db
   cagent workflow status /tmp/my-workflow.db`,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: runWorkflowStatus,
 	}
 
@@ -426,7 +454,17 @@ Requires a workflow that was run with the --db flag.`,
 func runWorkflowStatus(cmd *cobra.Command, args []string) error {
 	telemetry.TrackCommand("workflow status", nil)
 
-	dbPath := args[0]
+	// Use default database if not specified
+	var dbPath string
+	if len(args) > 0 {
+		dbPath = args[0]
+	} else {
+		var err error
+		dbPath, err = getDefaultWorkflowDB()
+		if err != nil {
+			return err
+		}
+	}
 
 	// Check if database exists
 	if _, err := os.Stat(dbPath); err != nil {
@@ -504,16 +542,17 @@ func newWorkflowResumeCmd() *cobra.Command {
 	var workflowFile string
 
 	cmd := &cobra.Command{
-		Use:   "resume <db-path>",
+		Use:   "resume [db-path]",
 		Short: "Resume an interrupted workflow",
 		Long: `Resume an interrupted or failed workflow from its last completed step.
-Automatically detects resumable workflows in the database.`,
-		Example: `  cagent workflow resume ./workflow.db
+Automatically detects resumable workflows in the database.
+Defaults to ~/.cagent/workflows.db if no path specified.`,
+		Example: `  cagent workflow resume --workflow pipeline.cagent
   cagent workflow resume ./workflow.db --namespace research-pipeline-123
-  cagent workflow resume ./workflow.db --clean --workflow pipeline.cagent`,
-		Args: cobra.ExactArgs(1),
+  cagent workflow resume --clean --workflow pipeline.cagent`,
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runWorkflowResume(cmd, args[0], namespace, clean, allowChanges, workflowFile)
+			return runWorkflowResume(cmd, args, namespace, clean, allowChanges, workflowFile)
 		},
 	}
 
@@ -525,11 +564,23 @@ Automatically detects resumable workflows in the database.`,
 	return cmd
 }
 
-func runWorkflowResume(cmd *cobra.Command, dbPath, namespace string, clean, allowChanges bool, workflowFile string) error {
+func runWorkflowResume(cmd *cobra.Command, args []string, namespace string, clean, allowChanges bool, workflowFile string) error {
 	telemetry.TrackCommand("workflow resume", nil)
 
 	if workflowFile == "" {
 		return fmt.Errorf("--workflow flag is required")
+	}
+
+	// Use default database if not specified
+	var dbPath string
+	if len(args) > 0 {
+		dbPath = args[0]
+	} else {
+		var err error
+		dbPath, err = getDefaultWorkflowDB()
+		if err != nil {
+			return err
+		}
 	}
 
 	ctx := cmd.Context()
@@ -626,14 +677,15 @@ func newWorkflowTagCmd() *cobra.Command {
 	var findTag string
 
 	cmd := &cobra.Command{
-		Use:   "tag <db-path> <namespace> <tag...>",
+		Use:   "tag [db-path] <namespace> <tag...>",
 		Short: "Tag workflow runs for organization",
 		Long: `Add tags to workflow runs for grouping and filtering.
-Tags help organize workflows by feature, sprint, team, etc.`,
-		Example: `  cagent workflow tag workflow.db research-123 feature search sprint-12
-  cagent workflow tag workflow.db research-123 --list
-  cagent workflow tag workflow.db --find feature`,
-		Args: cobra.MinimumNArgs(1),
+Tags help organize workflows by feature, sprint, team, etc.
+Defaults to ~/.cagent/workflows.db if no db-path specified.`,
+		Example: `  cagent workflow tag research-123 feature search sprint-12
+  cagent workflow tag research-123 --list
+  cagent workflow tag --find feature`,
+		Args: cobra.MinimumNArgs(0),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			return runWorkflowTag(cmd, args, listFlag, findTag)
 		},
@@ -648,11 +700,33 @@ Tags help organize workflows by feature, sprint, team, etc.`,
 func runWorkflowTag(cmd *cobra.Command, args []string, listFlag bool, findTag string) error {
 	telemetry.TrackCommand("workflow tag", nil)
 
-	if len(args) < 1 {
-		return fmt.Errorf("database path required")
+	// Determine if first arg is db-path or namespace
+	// If it looks like a path (.db, .sqlite, /), treat as db-path
+	// Otherwise treat as namespace and use default DB
+	var dbPath string
+	var namespace string
+	var tags []string
+
+	if len(args) > 0 && (strings.HasSuffix(args[0], ".db") || strings.HasSuffix(args[0], ".sqlite") || strings.Contains(args[0], "/")) {
+		// First arg is explicit db-path
+		dbPath = args[0]
+		if len(args) > 1 {
+			namespace = args[1]
+			tags = args[2:]
+		}
+	} else {
+		// Use default DB, first arg is namespace
+		var err error
+		dbPath, err = getDefaultWorkflowDB()
+		if err != nil {
+			return err
+		}
+		if len(args) > 0 {
+			namespace = args[0]
+			tags = args[1:]
+		}
 	}
 
-	dbPath := args[0]
 	ctx := cmd.Context()
 
 	// Open runner (provides access to namespace tagging)
@@ -663,20 +737,19 @@ func runWorkflowTag(cmd *cobra.Command, args []string, listFlag bool, findTag st
 	defer r.Close()
 
 	if listFlag {
-		if len(args) < 2 {
+		if namespace == "" {
 			return fmt.Errorf("namespace required with --list")
 		}
-		namespace := args[1]
 
-		tags, err := r.GetNamespaceTags(ctx, namespace)
+		nsTags, err := r.GetNamespaceTags(ctx, namespace)
 		if err != nil {
 			return fmt.Errorf("get tags: %w", err)
 		}
 
-		if len(tags) == 0 {
+		if len(nsTags) == 0 {
 			fmt.Fprintf(cmd.OutOrStdout(), "No tags for %s\n", namespace)
 		} else {
-			fmt.Fprintf(cmd.OutOrStdout(), "Tags for %s: %s\n", namespace, strings.Join(tags, ", "))
+			fmt.Fprintf(cmd.OutOrStdout(), "Tags for %s: %s\n", namespace, strings.Join(nsTags, ", "))
 		}
 		return nil
 	}
@@ -695,12 +768,12 @@ func runWorkflowTag(cmd *cobra.Command, args []string, listFlag bool, findTag st
 	}
 
 	// Set tags
-	if len(args) < 3 {
-		return fmt.Errorf("usage: tag <db> <namespace> <tag...>")
+	if namespace == "" {
+		return fmt.Errorf("namespace required")
 	}
-
-	namespace := args[1]
-	tags := args[2:]
+	if len(tags) == 0 {
+		return fmt.Errorf("at least one tag required")
+	}
 
 	if err := r.SetNamespaceTags(ctx, namespace, tags); err != nil {
 		return fmt.Errorf("set tags: %w", err)
@@ -715,16 +788,17 @@ func newWorkflowListCmd() *cobra.Command {
 	var tagFilter string
 
 	cmd := &cobra.Command{
-		Use:   "list <db-path>",
+		Use:   "list [db-path]",
 		Short: "List all workflow runs",
 		Long: `List all workflow runs in a database with their status.
-Filter by status (running, completed, failed) or tags.`,
-		Example: `  cagent workflow list workflow.db
-  cagent workflow list workflow.db --status running
+Filter by status (running, completed, failed) or tags.
+Defaults to ~/.cagent/workflows.db if no path specified.`,
+		Example: `  cagent workflow list
+  cagent workflow list --status running
   cagent workflow list workflow.db --tag feature`,
-		Args: cobra.ExactArgs(1),
+		Args: cobra.MaximumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return runWorkflowList(cmd, args[0], statusFilter, tagFilter)
+			return runWorkflowList(cmd, args, statusFilter, tagFilter)
 		},
 	}
 
@@ -734,8 +808,20 @@ Filter by status (running, completed, failed) or tags.`,
 	return cmd
 }
 
-func runWorkflowList(cmd *cobra.Command, dbPath, statusFilter, tagFilter string) error {
+func runWorkflowList(cmd *cobra.Command, args []string, statusFilter, tagFilter string) error {
 	telemetry.TrackCommand("workflow list", nil)
+
+	// Use default database if not specified
+	var dbPath string
+	if len(args) > 0 {
+		dbPath = args[0]
+	} else {
+		var err error
+		dbPath, err = getDefaultWorkflowDB()
+		if err != nil {
+			return err
+		}
+	}
 
 	ctx := cmd.Context()
 
@@ -849,3 +935,129 @@ func runWorkflowList(cmd *cobra.Command, dbPath, statusFilter, tagFilter string)
 	return nil
 }
 
+func newWorkflowPruneCmd() *cobra.Command {
+	var olderThan string
+	var namespace string
+	var all bool
+
+	cmd := &cobra.Command{
+		Use:   "prune [db-path]",
+		Short: "Clean up old workflow runs",
+		Long: `Remove old workflow runs from the database to free up space.
+Defaults to ~/.cagent/workflows.db if no path specified.`,
+		Example: `  cagent workflow prune --older-than 30d
+  cagent workflow prune --namespace research-pipeline-123
+  cagent workflow prune --all
+  cagent workflow prune workflow.db --older-than 7d`,
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runWorkflowPrune(cmd, args, olderThan, namespace, all)
+		},
+	}
+
+	cmd.Flags().StringVar(&olderThan, "older-than", "", "Delete runs older than duration (e.g., 30d, 7d, 24h)")
+	cmd.Flags().StringVar(&namespace, "namespace", "", "Delete specific namespace")
+	cmd.Flags().BoolVar(&all, "all", false, "Delete all workflow runs (use with caution)")
+
+	return cmd
+}
+
+func runWorkflowPrune(cmd *cobra.Command, args []string, olderThan, namespace string, all bool) error {
+	telemetry.TrackCommand("workflow prune", nil)
+
+	// Use default database if not specified
+	var dbPath string
+	if len(args) > 0 {
+		dbPath = args[0]
+	} else {
+		var err error
+		dbPath, err = getDefaultWorkflowDB()
+		if err != nil {
+			return err
+		}
+	}
+
+	ctx := cmd.Context()
+
+	// Open runner
+	r, err := runner.New(dbPath, nil)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer r.Close()
+
+	if namespace != "" {
+		// Delete specific namespace
+		graph := r.Graph()
+		if _, err := graph.Delete(ctx, &graphpb.DeleteRequest{
+			Namespace: namespace,
+		}); err != nil {
+			return fmt.Errorf("delete namespace: %w", err)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "✓ Deleted namespace: %s\n", namespace)
+		return nil
+	}
+
+	if all {
+		// Confirm before deleting everything
+		fmt.Fprintf(cmd.ErrOrStderr(), "⚠ This will delete ALL workflow runs. Continue? [y/N] ")
+		var response string
+		fmt.Scanln(&response)
+		if response != "y" && response != "Y" {
+			return fmt.Errorf("cancelled")
+		}
+
+		// Delete all by removing the database file
+		r.Close()
+		if err := os.Remove(dbPath); err != nil {
+			return fmt.Errorf("delete database: %w", err)
+		}
+		fmt.Fprintf(cmd.OutOrStdout(), "✓ Deleted all workflow runs from %s\n", dbPath)
+		return nil
+	}
+
+	if olderThan != "" {
+		// Parse duration
+		duration, err := time.ParseDuration(olderThan)
+		if err != nil {
+			// Try adding hours if no unit specified
+			if _, err := time.ParseDuration(olderThan + "h"); err == nil {
+				duration, _ = time.ParseDuration(olderThan + "h")
+			} else {
+				return fmt.Errorf("invalid duration %q (use: 30d, 7d, 24h)", olderThan)
+			}
+		}
+
+		cutoff := time.Now().Add(-duration)
+
+		// List all runs and delete old ones
+		runs, err := r.ListAllWorkflowRuns(ctx, "")
+		if err != nil {
+			return fmt.Errorf("list runs: %w", err)
+		}
+
+		deleted := 0
+		graph := r.Graph()
+		for _, run := range runs {
+			startTime, err := time.Parse(time.RFC3339, run.StartedAt)
+			if err != nil {
+				continue
+			}
+
+			if startTime.Before(cutoff) {
+				if _, err := graph.Delete(ctx, &graphpb.DeleteRequest{
+					Namespace: run.Namespace,
+				}); err != nil {
+					fmt.Fprintf(cmd.ErrOrStderr(), "Warning: failed to delete %s: %v\n", run.Namespace, err)
+					continue
+				}
+				deleted++
+			}
+		}
+
+		fmt.Fprintf(cmd.OutOrStdout(), "✓ Deleted %d workflow run(s) older than %s\n", deleted, olderThan)
+		return nil
+	}
+
+	return fmt.Errorf("specify --older-than, --namespace, or --all")
+}
