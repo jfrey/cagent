@@ -49,7 +49,8 @@ workflow test {
 
 	mockAgentFn := func(_ context.Context, params graphagent.AgentParams) (*graphagent.AgentResult, error) {
 		callCount.Add(1)
-		prompts.Store(params.Agent, params.Prompt)
+		// Store the full context: instruction + prompt (engine may split data across both)
+		prompts.Store(params.Agent, params.Instruction+"\n"+params.Prompt)
 		switch params.Agent {
 		case "writer":
 			return &graphagent.AgentResult{Output: "intermediate content from writer"}, nil

@@ -9,6 +9,7 @@ import (
 
 	"encoding/json"
 	"strings"
+	"time"
 
 	graphagent "github.com/docker/cagent-graph/pkg/agent"
 	"github.com/docker/cagent-graph/pkg/engine"
@@ -29,7 +30,8 @@ type Result struct {
 	StepsRun   int
 	TotalCost  float64
 	StepErrors map[string]error
-	Outputs    map[string][]byte // Terminal node content keyed by type.
+	Outputs    map[string][]byte   // Terminal node content keyed by type.
+	OutputIDs  map[string][]string // Terminal node IDs keyed by type.
 }
 
 // Option configures an Executor.
@@ -49,11 +51,21 @@ func WithLogger(l *slog.Logger) Option {
 	}
 }
 
+// WithDBPath sets a persistent SQLite database path for the graph store.
+// When set, the database is not deleted after execution, enabling inspection
+// and resumption of workflows.
+func WithDBPath(path string) Option {
+	return func(e *Executor) {
+		e.dbPath = path
+	}
+}
+
 // Executor runs .graph workflows using cagent's agent system.
 type Executor struct {
 	team    *team.Team
 	agentFn graphagent.AgentFunc
 	logger  *slog.Logger
+	dbPath  string // when set, graph DB persists at this path
 }
 
 // New creates a workflow Executor backed by the given agent team.
@@ -101,14 +113,27 @@ func (e *Executor) RunSource(ctx context.Context, src []byte, inputs map[string]
 }
 
 func (e *Executor) newRunner() (*runner.Runner, func(), error) {
-	dir, err := os.MkdirTemp("", "cagent-workflow-*")
-	if err != nil {
-		return nil, nil, fmt.Errorf("create temp dir: %w", err)
+	var dbPath string
+	var tempDir string
+
+	if e.dbPath != "" {
+		// Persistent DB — user specified a path.
+		dbPath = e.dbPath
+	} else {
+		// Ephemeral DB — create a temp dir that gets cleaned up.
+		dir, err := os.MkdirTemp("", "cagent-workflow-*")
+		if err != nil {
+			return nil, nil, fmt.Errorf("create temp dir: %w", err)
+		}
+		tempDir = dir
+		dbPath = filepath.Join(dir, "graph.db")
 	}
-	dbPath := filepath.Join(dir, "graph.db")
+
 	r, err := runner.New(dbPath, e.agentFn)
 	if err != nil {
-		os.RemoveAll(dir)
+		if tempDir != "" {
+			os.RemoveAll(tempDir)
+		}
 		return nil, nil, err
 	}
 	if e.logger != nil {
@@ -116,7 +141,9 @@ func (e *Executor) newRunner() (*runner.Runner, func(), error) {
 	}
 	cleanup := func() {
 		r.Close()
-		os.RemoveAll(dir)
+		if tempDir != "" {
+			os.RemoveAll(tempDir)
+		}
 	}
 	return r, cleanup, nil
 }
@@ -127,13 +154,18 @@ func (e *Executor) run(ctx context.Context, r *runner.Runner, inputs map[string]
 		return nil, fmt.Errorf("no workflows defined")
 	}
 
+	// Generate a run ID so we can seed into the correct namespace.
+	// The runner creates namespace = workflowName + "-" + runID.
+	runID := fmt.Sprintf("%d", time.Now().UnixNano())
+	namespace := workflows[0].Name + "-" + runID
+
 	// Seed inputs into the graph.
 	g := r.Graph()
 	for nodeType, content := range inputs {
 		if _, err := g.Put(ctx, &graphpb.PutRequest{
 			Nodes: []*graphpb.Node{{
 				Type:      nodeType,
-				Namespace: workflows[0].Name,
+				Namespace: namespace,
 				Content:   []byte(content),
 				MediaType: "text/plain",
 			}},
@@ -142,7 +174,7 @@ func (e *Executor) run(ctx context.Context, r *runner.Runner, inputs map[string]
 		}
 	}
 
-	res, err := r.Run(ctx, 0)
+	res, err := r.Run(ctx, 0, runner.WithRunID(runID))
 	if err != nil {
 		return nil, err
 	}
@@ -152,6 +184,7 @@ func (e *Executor) run(ctx context.Context, r *runner.Runner, inputs map[string]
 		TotalCost:  res.TotalCost,
 		StepErrors: res.StepErrors,
 		Outputs:    res.Outputs,
+		OutputIDs:  res.OutputIDs,
 	}, nil
 }
 
@@ -414,5 +447,6 @@ var _ = func(r *engine.ExecutionResult) *Result {
 		TotalCost:  r.TotalCost,
 		StepErrors: r.StepErrors,
 		Outputs:    r.Outputs,
+		OutputIDs:  r.OutputIDs,
 	}
 }
