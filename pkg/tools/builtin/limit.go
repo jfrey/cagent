@@ -1,6 +1,8 @@
 package builtin
 
 const (
+	// TODO: Consider reducing to 1MB or making this configurable per-tool/per-workflow
+	// to prevent memory exhaustion and context window overflow. See LOOKOUT_REVIEW.md.
 	maxOutputSize = 10000000 // 10MB
 
 	maxFiles = 100

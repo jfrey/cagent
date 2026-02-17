@@ -9,7 +9,8 @@ import (
 
 	"encoding/json"
 	"strings"
-	"time"
+
+	"github.com/google/uuid"
 
 	graphagent "github.com/docker/cagent-graph/pkg/agent"
 	"github.com/docker/cagent-graph/pkg/engine"
@@ -60,7 +61,7 @@ func WithDBPath(path string) Option {
 	}
 }
 
-// Executor runs .graph workflows using cagent's agent system.
+// Executor runs .cgt workflows using cagent's agent system.
 type Executor struct {
 	team    *team.Team
 	agentFn graphagent.AgentFunc
@@ -80,7 +81,7 @@ func New(t *team.Team, opts ...Option) *Executor {
 	return e
 }
 
-// RunFile compiles and executes a .graph workflow file. Inputs are seeded
+// RunFile compiles and executes a .cgt workflow file. Inputs are seeded
 // into the graph before execution; map keys are node types and values are
 // content strings.
 func (e *Executor) RunFile(ctx context.Context, graphFile string, inputs map[string]string) (*Result, error) {
@@ -97,7 +98,7 @@ func (e *Executor) RunFile(ctx context.Context, graphFile string, inputs map[str
 	return e.run(ctx, r, inputs)
 }
 
-// RunSource compiles and executes .graph source bytes.
+// RunSource compiles and executes .cgt source bytes.
 func (e *Executor) RunSource(ctx context.Context, src []byte, inputs map[string]string) (*Result, error) {
 	r, cleanup, err := e.newRunner()
 	if err != nil {
@@ -156,7 +157,7 @@ func (e *Executor) run(ctx context.Context, r *runner.Runner, inputs map[string]
 
 	// Generate a run ID so we can seed into the correct namespace.
 	// The runner creates namespace = workflowName + "-" + runID.
-	runID := fmt.Sprintf("%d", time.Now().UnixNano())
+	runID := uuid.New().String()
 	namespace := workflows[0].Name + "-" + runID
 
 	// Seed inputs into the graph.
@@ -422,7 +423,9 @@ func mcpToolToCagentTool(mt graphagent.MCPTool, callFn graphagent.ToolCallFunc) 
 	// Parse the input schema into a map for the cagent tool definition.
 	var schema any
 	if len(mt.InputSchema) > 0 {
-		_ = json.Unmarshal(mt.InputSchema, &schema)
+		if err := json.Unmarshal(mt.InputSchema, &schema); err != nil {
+			slog.Warn("Failed to parse tool input schema", "tool", mt.Name, "error", err)
+		}
 	}
 
 	return tools.Tool{

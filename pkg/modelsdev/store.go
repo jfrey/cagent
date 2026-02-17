@@ -199,6 +199,10 @@ func (s *Store) GetModel(ctx context.Context, id string) (*Model, error) {
 		// (e.g., provider="openai" model="anthropic/claude-haiku-4-5" via a gateway),
 		// try parsing the model string itself as a provider/model pair.
 		if realProvider, realModel, ok := strings.Cut(modelID, "/"); ok {
+			slog.Debug("Model not found in provider, trying as proxied model",
+				"original_id", modelID,
+				"provider", realProvider,
+				"model", realModel)
 			if m, err := s.getModelDirect(ctx, realProvider, realModel); err == nil {
 				return m, nil
 			}
@@ -211,7 +215,8 @@ func (s *Store) GetModel(ctx context.Context, id string) (*Model, error) {
 }
 
 // getModelDirect looks up a model by explicit provider and model name,
-// without going through the full ID parsing logic.
+// without going through the full ID parsing logic. Used internally by
+// GetModel for proxied model fallback when the initial lookup fails.
 func (s *Store) getModelDirect(ctx context.Context, providerID, modelID string) (*Model, error) {
 	provider, err := s.GetProvider(ctx, providerID)
 	if err != nil {

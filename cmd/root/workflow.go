@@ -6,9 +6,11 @@ import (
 	"log/slog"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 
+	"github.com/docker/cagent-graph/pkg/compiler"
 	"github.com/docker/cagent-graph/pkg/engine"
 	graphpb "github.com/docker/cagent-graph/pkg/graph/v1"
 	"github.com/docker/cagent-graph/pkg/runner"
@@ -30,6 +32,9 @@ func newWorkflowCmd() *cobra.Command {
 	cmd.AddCommand(newWorkflowDescribeCmd())
 	cmd.AddCommand(newWorkflowInitCmd())
 	cmd.AddCommand(newWorkflowStatusCmd())
+	cmd.AddCommand(newWorkflowResumeCmd())
+	cmd.AddCommand(newWorkflowTagCmd())
+	cmd.AddCommand(newWorkflowListCmd())
 	return cmd
 }
 
@@ -436,6 +441,11 @@ func runWorkflowStatus(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("query nodes: %w", err)
 	}
 
+	// Warn if results may be truncated
+	if len(resp.Nodes) >= 1000 {
+		fmt.Fprintf(cmd.ErrOrStderr(), "Warning: showing first 1000 nodes (results may be truncated)\n")
+	}
+
 	// Analyze nodes
 	nodesByType := make(map[string]int)
 	nodesWithContent := 0
@@ -465,20 +475,9 @@ func runWorkflowStatus(cmd *cobra.Command, args []string) error {
 }
 
 // compileWorkflowFile parses a workflow file and returns the compiled workflows.
-// Creates a temporary in-memory runner to leverage the DSL compiler.
+// Uses the public compiler API (no runner needed).
 func compileWorkflowFile(graphFile string) ([]engine.Workflow, error) {
-	// Create temp runner with in-memory DB (we only need compilation, not execution)
-	r, err := runner.New(":memory:", nil)
-	if err != nil {
-		return nil, fmt.Errorf("create runner: %w", err)
-	}
-	defer r.Close()
-
-	if err := r.CompileFile(graphFile); err != nil {
-		return nil, err
-	}
-
-	return r.Workflows(), nil
+	return compiler.CompileFile(graphFile)
 }
 
 func openGraphDB(dbPath string) (engine.Graph, error) {
@@ -489,3 +488,356 @@ func openGraphDB(dbPath string) (engine.Graph, error) {
 	}
 	return r.Graph(), nil
 }
+
+func newWorkflowResumeCmd() *cobra.Command {
+	var namespace string
+	var clean bool
+	var allowChanges bool
+	var workflowFile string
+
+	cmd := &cobra.Command{
+		Use:   "resume <db-path>",
+		Short: "Resume an interrupted workflow",
+		Long: `Resume an interrupted or failed workflow from its last completed step.
+Automatically detects resumable workflows in the database.`,
+		Example: `  cagent workflow resume ./workflow.db
+  cagent workflow resume ./workflow.db --namespace research-pipeline-123
+  cagent workflow resume ./workflow.db --clean --workflow pipeline.cgt`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runWorkflowResume(cmd, args[0], namespace, clean, allowChanges, workflowFile)
+		},
+	}
+
+	cmd.Flags().StringVar(&namespace, "namespace", "", "Specific namespace to resume")
+	cmd.Flags().BoolVar(&clean, "clean", false, "Clean partial outputs before resuming")
+	cmd.Flags().BoolVar(&allowChanges, "allow-changes", false, "Allow resuming if workflow definition changed")
+	cmd.Flags().StringVar(&workflowFile, "workflow", "", "Workflow definition file (required)")
+
+	return cmd
+}
+
+func runWorkflowResume(cmd *cobra.Command, dbPath, namespace string, clean, allowChanges bool, workflowFile string) error {
+	telemetry.TrackCommand("workflow resume", nil)
+
+	if workflowFile == "" {
+		return fmt.Errorf("--workflow flag is required")
+	}
+
+	ctx := cmd.Context()
+
+	// Create runner
+	r, err := runner.New(dbPath, nil) // agentFn will be set later
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer r.Close()
+
+	// Compile workflow
+	if err := r.CompileFile(workflowFile); err != nil {
+		return fmt.Errorf("compile workflow: %w", err)
+	}
+
+	// If namespace not specified, detect resumable runs
+	if namespace == "" {
+		runs, err := r.ListWorkflowRuns(ctx)
+		if err != nil {
+			return fmt.Errorf("list runs: %w", err)
+		}
+
+		resumable := make([]*runner.WorkflowState, 0)
+		for _, run := range runs {
+			if run.CanResume {
+				resumable = append(resumable, run)
+			}
+		}
+
+		if len(resumable) == 0 {
+			return fmt.Errorf("no resumable workflows found in %s", dbPath)
+		}
+
+		if len(resumable) > 1 {
+			fmt.Fprintf(cmd.ErrOrStderr(), "Multiple resumable workflows found:\n")
+			for i, run := range resumable {
+				fmt.Fprintf(cmd.ErrOrStderr(), "  %d. %s (%d/%d steps)\n",
+					i+1, run.Namespace, len(run.CompletedSteps), run.TotalSteps)
+			}
+			return fmt.Errorf("specify --namespace <ns> to choose one")
+		}
+
+		namespace = resumable[0].Namespace
+	}
+
+	// Check state
+	state, err := r.GetWorkflowState(ctx, namespace)
+	if err != nil {
+		return fmt.Errorf("get workflow state: %w", err)
+	}
+
+	if !state.CanResume {
+		return fmt.Errorf("cannot resume: %s", state.Reason)
+	}
+
+	// Show what will happen
+	fmt.Fprintf(cmd.OutOrStdout(), "Resuming workflow: %s\n", state.WorkflowName)
+	fmt.Fprintf(cmd.OutOrStdout(), "  Namespace: %s\n", namespace)
+	fmt.Fprintf(cmd.OutOrStdout(), "  Completed: %d/%d steps\n", len(state.CompletedSteps), state.TotalSteps)
+	if len(state.PartialSteps) > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "  Partial: %d step(s) with incomplete outputs\n", len(state.PartialSteps))
+		if clean {
+			fmt.Fprintf(cmd.OutOrStdout(), "  Action: Cleaning partial outputs before resuming\n")
+		}
+	}
+	if state.WorkflowModified {
+		fmt.Fprintf(cmd.OutOrStdout(), "  ⚠ Warning: Workflow definition has changed since this run started\n")
+		if !allowChanges {
+			return fmt.Errorf("use --allow-changes to resume modified workflow")
+		}
+	}
+
+	// Resume
+	result, err := r.Resume(ctx, namespace, &runner.ResumeOptions{
+		CleanPartialOutputs: clean,
+		AllowWorkflowChange: allowChanges,
+	})
+	if err != nil {
+		return fmt.Errorf("resume failed: %w", err)
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "\n✓ Workflow resumed successfully\n")
+	fmt.Fprintf(cmd.OutOrStdout(), "  Steps executed: %d\n", result.StepsRun)
+	if result.TotalCost > 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "  Cost: $%.2f\n", result.TotalCost)
+	}
+
+	return nil
+}
+
+func newWorkflowTagCmd() *cobra.Command {
+	var listFlag bool
+	var findTag string
+
+	cmd := &cobra.Command{
+		Use:   "tag <db-path> <namespace> <tag...>",
+		Short: "Tag workflow runs for organization",
+		Long: `Add tags to workflow runs for grouping and filtering.
+Tags help organize workflows by feature, sprint, team, etc.`,
+		Example: `  cagent workflow tag workflow.db research-123 feature search sprint-12
+  cagent workflow tag workflow.db research-123 --list
+  cagent workflow tag workflow.db --find feature`,
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runWorkflowTag(cmd, args, listFlag, findTag)
+		},
+	}
+
+	cmd.Flags().BoolVar(&listFlag, "list", false, "List tags for a namespace")
+	cmd.Flags().StringVar(&findTag, "find", "", "Find namespaces with a tag")
+
+	return cmd
+}
+
+func runWorkflowTag(cmd *cobra.Command, args []string, listFlag bool, findTag string) error {
+	telemetry.TrackCommand("workflow tag", nil)
+
+	if len(args) < 1 {
+		return fmt.Errorf("database path required")
+	}
+
+	dbPath := args[0]
+	ctx := cmd.Context()
+
+	// Open runner (provides access to namespace tagging)
+	r, err := runner.New(dbPath, nil)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer r.Close()
+
+	if listFlag {
+		if len(args) < 2 {
+			return fmt.Errorf("namespace required with --list")
+		}
+		namespace := args[1]
+
+		tags, err := r.GetNamespaceTags(ctx, namespace)
+		if err != nil {
+			return fmt.Errorf("get tags: %w", err)
+		}
+
+		if len(tags) == 0 {
+			fmt.Fprintf(cmd.OutOrStdout(), "No tags for %s\n", namespace)
+		} else {
+			fmt.Fprintf(cmd.OutOrStdout(), "Tags for %s: %s\n", namespace, strings.Join(tags, ", "))
+		}
+		return nil
+	}
+
+	if findTag != "" {
+		namespaces, err := r.ListNamespacesByTags(ctx, []string{findTag})
+		if err != nil {
+			return fmt.Errorf("find namespaces: %w", err)
+		}
+
+		fmt.Fprintf(cmd.OutOrStdout(), "Namespaces with tag '%s':\n", findTag)
+		for _, ns := range namespaces {
+			fmt.Fprintf(cmd.OutOrStdout(), "  - %s\n", ns)
+		}
+		return nil
+	}
+
+	// Set tags
+	if len(args) < 3 {
+		return fmt.Errorf("usage: tag <db> <namespace> <tag...>")
+	}
+
+	namespace := args[1]
+	tags := args[2:]
+
+	if err := r.SetNamespaceTags(ctx, namespace, tags); err != nil {
+		return fmt.Errorf("set tags: %w", err)
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "✓ Tagged %s with: %s\n", namespace, strings.Join(tags, ", "))
+	return nil
+}
+
+func newWorkflowListCmd() *cobra.Command {
+	var statusFilter string
+	var tagFilter string
+
+	cmd := &cobra.Command{
+		Use:   "list <db-path>",
+		Short: "List all workflow runs",
+		Long: `List all workflow runs in a database with their status.
+Filter by status (running, completed, failed) or tags.`,
+		Example: `  cagent workflow list workflow.db
+  cagent workflow list workflow.db --status running
+  cagent workflow list workflow.db --tag feature`,
+		Args: cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runWorkflowList(cmd, args[0], statusFilter, tagFilter)
+		},
+	}
+
+	cmd.Flags().StringVar(&statusFilter, "status", "", "Filter by status (running, completed, failed)")
+	cmd.Flags().StringVar(&tagFilter, "tag", "", "Filter by tag")
+
+	return cmd
+}
+
+func runWorkflowList(cmd *cobra.Command, dbPath, statusFilter, tagFilter string) error {
+	telemetry.TrackCommand("workflow list", nil)
+
+	ctx := cmd.Context()
+
+	// Open runner
+	r, err := runner.New(dbPath, nil)
+	if err != nil {
+		return fmt.Errorf("open database: %w", err)
+	}
+	defer r.Close()
+
+	// List runs based on status filter
+	var runs []*runner.WorkflowRunInfo
+	if statusFilter != "" {
+		var status runner.WorkflowRunStatus
+		switch statusFilter {
+		case "running":
+			status = runner.WorkflowRunStatusRunning
+		case "completed":
+			status = runner.WorkflowRunStatusCompleted
+		case "failed":
+			status = runner.WorkflowRunStatusFailed
+		default:
+			return fmt.Errorf("invalid status: %s (use running, completed, or failed)", statusFilter)
+		}
+		runs, err = r.ListAllWorkflowRuns(ctx, status)
+	} else {
+		// List all - get all status types
+		runningRuns, err := r.ListAllWorkflowRuns(ctx, runner.WorkflowRunStatusRunning)
+		if err != nil {
+			return fmt.Errorf("list running workflows: %w", err)
+		}
+
+		completedRuns, err := r.ListAllWorkflowRuns(ctx, runner.WorkflowRunStatusCompleted)
+		if err != nil {
+			return fmt.Errorf("list completed workflows: %w", err)
+		}
+
+		failedRuns, err := r.ListAllWorkflowRuns(ctx, runner.WorkflowRunStatusFailed)
+		if err != nil {
+			return fmt.Errorf("list failed workflows: %w", err)
+		}
+
+		runs = append(runs, runningRuns...)
+		runs = append(runs, completedRuns...)
+		runs = append(runs, failedRuns...)
+	}
+
+	if err != nil {
+		return fmt.Errorf("list runs: %w", err)
+	}
+
+	// Filter by tag if specified
+	if tagFilter != "" {
+		namespaces, err := r.ListNamespacesByTags(ctx, []string{tagFilter})
+		if err != nil {
+			return fmt.Errorf("filter by tag: %w", err)
+		}
+
+		nsMap := make(map[string]bool)
+		for _, ns := range namespaces {
+			nsMap[ns] = true
+		}
+
+		filtered := make([]*runner.WorkflowRunInfo, 0)
+		for _, run := range runs {
+			if nsMap[run.Namespace] {
+				filtered = append(filtered, run)
+			}
+		}
+		runs = filtered
+	}
+
+	// Display
+	if len(runs) == 0 {
+		fmt.Fprintf(cmd.OutOrStdout(), "No workflow runs found\n")
+		return nil
+	}
+
+	fmt.Fprintf(cmd.OutOrStdout(), "Workflow Runs in %s:\n\n", dbPath)
+	for _, run := range runs {
+		fmt.Fprintf(cmd.OutOrStdout(), "Namespace: %s\n", run.Namespace)
+		fmt.Fprintf(cmd.OutOrStdout(), "  Workflow: %s\n", run.WorkflowName)
+		fmt.Fprintf(cmd.OutOrStdout(), "  Status: %s\n", run.Status)
+		fmt.Fprintf(cmd.OutOrStdout(), "  Started: %s\n", run.StartedAt)
+
+		if run.CompletedAt != "" {
+			// Parse timestamps to calculate duration
+			startTime, err1 := time.Parse(time.RFC3339, run.StartedAt)
+			endTime, err2 := time.Parse(time.RFC3339, run.CompletedAt)
+			if err1 == nil && err2 == nil {
+				duration := endTime.Sub(startTime)
+				fmt.Fprintf(cmd.OutOrStdout(), "  Finished: %s (%s)\n", run.CompletedAt, duration)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "  Finished: %s\n", run.CompletedAt)
+			}
+		}
+
+		if run.Error != "" {
+			fmt.Fprintf(cmd.OutOrStdout(), "  Error: %s\n", run.Error)
+		}
+
+		// Show tags if any
+		tags, _ := r.GetNamespaceTags(ctx, run.Namespace)
+		if len(tags) > 0 {
+			fmt.Fprintf(cmd.OutOrStdout(), "  Tags: %s\n", strings.Join(tags, ", "))
+		}
+
+		fmt.Fprintln(cmd.OutOrStdout())
+	}
+
+	return nil
+}
+
