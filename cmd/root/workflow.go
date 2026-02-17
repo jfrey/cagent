@@ -105,6 +105,7 @@ func (f *workflowRunFlags) runWorkflow(cmd *cobra.Command, args []string) error 
 	workflowLogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
 	var execOpts []workflow.Option
 	execOpts = append(execOpts, workflow.WithLogger(workflowLogger))
+	execOpts = append(execOpts, workflow.WithRunConfig(&f.runConfig))
 	if f.dbPath != "" {
 		execOpts = append(execOpts, workflow.WithDBPath(f.dbPath))
 	}

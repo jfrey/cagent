@@ -17,12 +17,14 @@ import (
 	graphpb "github.com/docker/cagent-graph/pkg/graph/v1"
 	"github.com/docker/cagent-graph/pkg/runner"
 	cagent "github.com/docker/cagent/pkg/agent"
+	"github.com/docker/cagent/pkg/config"
 	"github.com/docker/cagent/pkg/config/latest"
 	"github.com/docker/cagent/pkg/environment"
 	provider "github.com/docker/cagent/pkg/model/provider"
 	"github.com/docker/cagent/pkg/runtime"
 	"github.com/docker/cagent/pkg/session"
 	"github.com/docker/cagent/pkg/team"
+	"github.com/docker/cagent/pkg/teamloader"
 	"github.com/docker/cagent/pkg/tools"
 )
 
@@ -61,12 +63,21 @@ func WithDBPath(path string) Option {
 	}
 }
 
+// WithRunConfig provides runtime configuration for toolset creation.
+// Required for workflows that use inline agent definitions with toolsets.
+func WithRunConfig(cfg *config.RuntimeConfig) Option {
+	return func(e *Executor) {
+		e.runConfig = cfg
+	}
+}
+
 // Executor runs .cgt workflows using cagent's agent system.
 type Executor struct {
-	team    *team.Team
-	agentFn graphagent.AgentFunc
-	logger  *slog.Logger
-	dbPath  string // when set, graph DB persists at this path
+	team      *team.Team
+	agentFn   graphagent.AgentFunc
+	logger    *slog.Logger
+	dbPath    string // when set, graph DB persists at this path
+	runConfig *config.RuntimeConfig
 }
 
 // New creates a workflow Executor backed by the given agent team.
@@ -321,13 +332,42 @@ func (e *Executor) buildRuntimeFromGraph(ctx context.Context, params graphagent.
 		return nil, "", 0, fmt.Errorf("step %s: create provider: %w", params.Agent, err)
 	}
 
-	// Build a minimal agent with the model.
-	a := cagent.New(params.Agent, params.Instruction,
+	// Convert toolsets from .cgt to cagent toolsets
+	var agentOpts []cagent.Opt
+	agentOpts = append(agentOpts,
 		cagent.WithModel(p),
 		cagent.WithDescription(params.AgentDef.Description),
 		cagent.WithMaxIterations(params.AgentDef.MaxIterations),
 		cagent.WithSkillsEnabled(params.AgentDef.Skills),
 	)
+
+	// Process toolsets if defined
+	if len(params.AgentDef.Toolsets) > 0 {
+		// Use teamloader to convert toolsets (handles all types and properties)
+		workDir := "."
+		if e.runConfig != nil && e.runConfig.WorkingDir != "" {
+			workDir = e.runConfig.WorkingDir
+		}
+
+		// Create minimal runConfig if not provided
+		runCfg := e.runConfig
+		if runCfg == nil {
+			runCfg = &config.RuntimeConfig{
+				EnvProviderForTests: environment.NewOsEnvProvider(),
+			}
+		}
+
+		toolsets, warnings := teamloader.ConvertGraphToolsets(ctx, params.AgentDef.Toolsets, workDir, runCfg)
+		if len(warnings) > 0 {
+			agentOpts = append(agentOpts, cagent.WithLoadTimeWarnings(warnings))
+		}
+		if len(toolsets) > 0 {
+			agentOpts = append(agentOpts, cagent.WithToolSets(toolsets...))
+		}
+	}
+
+	// Build agent with toolsets
+	a := cagent.New(params.Agent, params.Instruction, agentOpts...)
 
 	// Build a single-agent team.
 	t := team.New(team.WithAgents(a))
