@@ -348,7 +348,68 @@ func runWorkflowDescribe(cmd *cobra.Command, args []string) error {
 			for name := range wf.Models {
 				fmt.Fprintf(cmd.OutOrStdout(), "  • %s\n", name)
 			}
+			fmt.Fprintln(cmd.OutOrStdout())
 		}
+
+		// Generate mermaid diagram
+		fmt.Fprintln(cmd.OutOrStdout(), "## Workflow Diagram\n")
+		fmt.Fprintln(cmd.OutOrStdout(), "```mermaid")
+		fmt.Fprintln(cmd.OutOrStdout(), "graph TD")
+
+		// Add nodes
+		nodeIDs := make(map[string]string)
+		nodeCount := 0
+		for typeName := range wf.Types {
+			nodeID := fmt.Sprintf("n%d", nodeCount)
+			nodeIDs[typeName] = nodeID
+			fmt.Fprintf(cmd.OutOrStdout(), "    %s[\"%s\"]\n", nodeID, typeName)
+			nodeCount++
+		}
+
+		fmt.Fprintln(cmd.OutOrStdout())
+
+		// Add steps and edges
+		for stepIdx, step := range wf.Steps {
+			stepID := fmt.Sprintf("s%d", stepIdx)
+			fmt.Fprintf(cmd.OutOrStdout(), "    %s[\"%s\"]\n", stepID, step.Agent)
+
+			// Edges from reads to step
+			for _, readType := range step.Reads {
+				if nodeID, ok := nodeIDs[readType]; ok {
+					fmt.Fprintf(cmd.OutOrStdout(), "    %s --> %s\n", nodeID, stepID)
+				}
+			}
+
+			// Edges from step to writes
+			for _, writeType := range step.Writes {
+				if nodeID, ok := nodeIDs[writeType]; ok {
+					fmt.Fprintf(cmd.OutOrStdout(), "    %s --> %s\n", stepID, nodeID)
+				}
+			}
+		}
+
+		fmt.Fprintln(cmd.OutOrStdout())
+
+		// Styling with good contrast
+		fmt.Fprintln(cmd.OutOrStdout(), "    %% Node types (data)")
+		for typeName, nodeID := range nodeIDs {
+			// Use distinct colors based on type
+			if strings.Contains(typeName, "input") || strings.Contains(typeName, "prompt") {
+				fmt.Fprintf(cmd.OutOrStdout(), "    style %s fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#000\n", nodeID)
+			} else if strings.Contains(typeName, "output") || strings.Contains(typeName, "result") || strings.Contains(typeName, "final") {
+				fmt.Fprintf(cmd.OutOrStdout(), "    style %s fill:#e8f5e9,stroke:#2e7d32,stroke-width:2px,color:#000\n", nodeID)
+			} else {
+				fmt.Fprintf(cmd.OutOrStdout(), "    style %s fill:#f5f5f5,stroke:#616161,stroke-width:2px,color:#000\n", nodeID)
+			}
+		}
+
+		fmt.Fprintln(cmd.OutOrStdout(), "    %% Agents (processing)")
+		for stepIdx := range wf.Steps {
+			stepID := fmt.Sprintf("s%d", stepIdx)
+			fmt.Fprintf(cmd.OutOrStdout(), "    style %s fill:#fff3e0,stroke:#ef6c00,stroke-width:2px,color:#000\n", stepID)
+		}
+
+		fmt.Fprintln(cmd.OutOrStdout(), "```")
 	}
 
 	return nil
