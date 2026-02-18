@@ -588,77 +588,16 @@ func runWorkflowResume(cmd *cobra.Command, args []string, namespace string, clea
 
 	ctx := cmd.Context()
 
-	// Create runner
-	r, err := runner.New(dbPath, nil) // agentFn will be set later
-	if err != nil {
-		return fmt.Errorf("open database: %w", err)
+	// Create executor with database path
+	workflowLogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	execOpts := []workflow.Option{
+		workflow.WithLogger(workflowLogger),
+		workflow.WithDBPath(dbPath),
 	}
-	defer r.Close()
+	exec := workflow.New(nil, execOpts...)
 
-	// Compile workflow
-	if err := r.CompileFile(workflowFile); err != nil {
-		return fmt.Errorf("compile workflow: %w", err)
-	}
-
-	// If namespace not specified, detect resumable runs
-	if namespace == "" {
-		runs, err := r.ListWorkflowRuns(ctx)
-		if err != nil {
-			return fmt.Errorf("list runs: %w", err)
-		}
-
-		resumable := make([]*runner.WorkflowState, 0)
-		for _, run := range runs {
-			if run.CanResume {
-				resumable = append(resumable, run)
-			}
-		}
-
-		if len(resumable) == 0 {
-			return fmt.Errorf("no resumable workflows found in %s", dbPath)
-		}
-
-		if len(resumable) > 1 {
-			fmt.Fprintf(cmd.ErrOrStderr(), "Multiple resumable workflows found:\n")
-			for i, run := range resumable {
-				fmt.Fprintf(cmd.ErrOrStderr(), "  %d. %s (%d/%d steps)\n",
-					i+1, run.Namespace, len(run.CompletedSteps), run.TotalSteps)
-			}
-			return fmt.Errorf("specify --namespace <ns> to choose one")
-		}
-
-		namespace = resumable[0].Namespace
-	}
-
-	// Check state
-	state, err := r.GetWorkflowState(ctx, namespace)
-	if err != nil {
-		return fmt.Errorf("get workflow state: %w", err)
-	}
-
-	if !state.CanResume {
-		return fmt.Errorf("cannot resume: %s", state.Reason)
-	}
-
-	// Show what will happen
-	fmt.Fprintf(cmd.OutOrStdout(), "Resuming workflow: %s\n", state.WorkflowName)
-	fmt.Fprintf(cmd.OutOrStdout(), "  Namespace: %s\n", namespace)
-	fmt.Fprintf(cmd.OutOrStdout(), "  Completed: %d/%d steps\n", len(state.CompletedSteps), state.TotalSteps)
-	if len(state.PartialSteps) > 0 {
-		fmt.Fprintf(cmd.OutOrStdout(), "  Partial: %d step(s) with incomplete outputs\n", len(state.PartialSteps))
-		if clean {
-			fmt.Fprintf(cmd.OutOrStdout(), "  Action: Cleaning partial outputs before resuming\n")
-		}
-	}
-	if state.WorkflowModified {
-		fmt.Fprintf(cmd.OutOrStdout(), "  ⚠ Warning: Workflow definition has changed since this run started\n")
-		if !allowChanges {
-			return fmt.Errorf("use --allow-changes to resume modified workflow")
-		}
-	}
-
-	// Resume
-	result, err := r.Resume(ctx, namespace, &runner.ResumeOptions{
+	// Resume using executor (handles agentFunc internally)
+	result, err := exec.Resume(ctx, workflowFile, namespace, &runner.ResumeOptions{
 		CleanPartialOutputs: clean,
 		AllowWorkflowChange: allowChanges,
 	})

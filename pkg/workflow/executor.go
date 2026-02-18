@@ -538,3 +538,50 @@ var _ = func(r *engine.ExecutionResult) *Result {
 		OutputIDs:  r.OutputIDs,
 	}
 }
+
+// Resume compiles a workflow and resumes execution from a previous run.
+func (e *Executor) Resume(ctx context.Context, workflowFile string, namespace string, opts *runner.ResumeOptions) (*Result, error) {
+	r, cleanup, err := e.newRunner()
+	if err != nil {
+		return nil, fmt.Errorf("create runner: %w", err)
+	}
+	defer cleanup()
+
+	// Compile workflow file
+	if err := r.CompileFile(workflowFile); err != nil {
+		return nil, fmt.Errorf("compile workflow: %w", err)
+	}
+
+	// Auto-detect namespace if not specified
+	if namespace == "" {
+		runs, err := r.ListWorkflowRuns(ctx)
+		if err != nil {
+			return nil, fmt.Errorf("list runs: %w", err)
+		}
+
+		for _, run := range runs {
+			if run.CanResume {
+				namespace = run.Namespace
+				break
+			}
+		}
+
+		if namespace == "" {
+			return nil, fmt.Errorf("no resumable workflows found")
+		}
+	}
+
+	// Resume execution
+	res, err := r.Resume(ctx, namespace, opts)
+	if err != nil {
+		return nil, err
+	}
+
+	return &Result{
+		StepsRun:   res.StepsRun,
+		TotalCost:  res.TotalCost,
+		StepErrors: res.StepErrors,
+		Outputs:    res.Outputs,
+		OutputIDs:  res.OutputIDs,
+	}, nil
+}
