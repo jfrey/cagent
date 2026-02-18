@@ -559,15 +559,27 @@ func (e *Executor) Resume(ctx context.Context, workflowFile string, namespace st
 			return nil, fmt.Errorf("list runs: %w", err)
 		}
 
+		if e.logger != nil {
+			e.logger.Info("Checking for resumable workflows", "total_runs", len(runs))
+			for i, run := range runs {
+				e.logger.Info("Workflow run", "index", i, "namespace", run.Namespace,
+					"completed_steps", len(run.CompletedSteps), "total_steps", run.TotalSteps,
+					"can_resume", run.CanResume, "reason", run.Reason)
+			}
+		}
+
 		for _, run := range runs {
 			if run.CanResume {
 				namespace = run.Namespace
+				if e.logger != nil {
+					e.logger.Info("Auto-selected resumable workflow", "namespace", namespace)
+				}
 				break
 			}
 		}
 
 		if namespace == "" {
-			return nil, fmt.Errorf("no resumable workflows found")
+			return nil, fmt.Errorf("no resumable workflows found (checked %d runs)", len(runs))
 		}
 	}
 
