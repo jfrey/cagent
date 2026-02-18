@@ -101,7 +101,7 @@ func (e *Executor) RunFile(ctx context.Context, graphFile string, inputs map[str
 }
 
 // RunFileWithSelection compiles and executes a specific workflow from a .cagent file.
-// If workflowName is empty, auto-selects by filename match or defaults to last workflow.
+// If workflowName is empty, auto-detects the root workflow (for composed imports).
 func (e *Executor) RunFileWithSelection(ctx context.Context, graphFile string, workflowName string, inputs map[string]string) (*Result, error) {
 	r, cleanup, err := e.newRunner()
 	if err != nil {
@@ -113,9 +113,33 @@ func (e *Executor) RunFileWithSelection(ctx context.Context, graphFile string, w
 		return nil, fmt.Errorf("compile %s: %w", graphFile, err)
 	}
 
-	// Select which workflow to run
+	// Select which workflow to run using runner's detection
+	var workflowIdx int
 	workflows := r.Workflows()
-	workflowIdx := selectWorkflow(workflows, graphFile, workflowName)
+
+	if workflowName != "" {
+		// Find by explicit name
+		workflowIdx = r.FindWorkflowByName(workflowName)
+		if workflowIdx == -1 {
+			names := engine.GetWorkflowNames(workflows)
+			return nil, fmt.Errorf("workflow %q not found. Available: %s", workflowName, strings.Join(names, ", "))
+		}
+	} else {
+		// Auto-detect root workflow
+		workflowIdx = r.FindRootWorkflow()
+		if workflowIdx == -1 {
+			return nil, fmt.Errorf("no workflows found")
+		}
+	}
+
+	// Debug: log which workflow was selected
+	if e.logger != nil {
+		e.logger.Info("Workflow selected",
+			"index", workflowIdx,
+			"name", workflows[workflowIdx].Name,
+			"steps", len(workflows[workflowIdx].Steps),
+			"total_workflows", len(workflows))
+	}
 
 	return e.runWorkflow(ctx, r, workflowIdx, inputs)
 }
@@ -207,7 +231,7 @@ func (e *Executor) runWorkflow(ctx context.Context, r *runner.Runner, workflowId
 		}
 	}
 
-	res, err := r.Run(ctx, 0, runner.WithRunID(runID))
+	res, err := r.Run(ctx, workflowIdx, runner.WithRunID(runID))
 	if err != nil {
 		return nil, err
 	}
@@ -513,37 +537,4 @@ var _ = func(r *engine.ExecutionResult) *Result {
 		Outputs:    r.Outputs,
 		OutputIDs:  r.OutputIDs,
 	}
-}
-
-// selectWorkflow chooses which workflow to run from a list.
-// Strategy:
-// 1. If workflowName specified, find exact match
-// 2. If filename matches a workflow name, use that
-// 3. Otherwise use last workflow (convention for composed workflows)
-func selectWorkflow(workflows []engine.Workflow, graphFile string, workflowName string) int {
-	if len(workflows) == 0 {
-		return -1
-	}
-
-	// Explicit name provided
-	if workflowName != "" {
-		for i, wf := range workflows {
-			if wf.Name == workflowName {
-				return i
-			}
-		}
-		// Name not found - return error index
-		return -1
-	}
-
-	// Try filename match (implementation.cagent → workflow "implementation")
-	baseName := strings.TrimSuffix(filepath.Base(graphFile), filepath.Ext(graphFile))
-	for i, wf := range workflows {
-		if wf.Name == baseName {
-			return i
-		}
-	}
-
-	// Default: last workflow (convention for composed workflows)
-	return len(workflows) - 1
 }
